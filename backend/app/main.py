@@ -50,19 +50,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "https://cyber-path-ai.vercel.app",
-    ],
+    allow_origins=[origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if origin.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.get("/healthz")
-def healthz():
-    return {"status": "ok"}
 
 # =========================================================
 # DATABASE
@@ -3220,11 +3213,35 @@ async def get_applications():
 @app.patch("/applications/{application_id}")
 async def update_application(
     application_id: int,
-    status: Optional[str] = Form(None),
-    priority: Optional[str] = Form(None),
-    deadline: Optional[str] = Form(None),
-    notes: Optional[str] = Form(None),
+    request: Request,
 ):
+    """Accept JSON from the web tracker and legacy form submissions."""
+    content_type = request.headers.get("content-type", "").lower()
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(status_code=400, detail="Invalid JSON body.")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="Expected a JSON object.")
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        payload = dict(await request.form())
+    else:
+        raise HTTPException(status_code=415, detail="Send JSON or form data.")
+
+    allowed = {"status", "priority", "deadline", "notes"}
+    updates = {key: value for key, value in payload.items() if key in allowed}
+    if not updates:
+        raise HTTPException(status_code=422, detail="No supported fields to update.")
+    for key, value in updates.items():
+        if value is not None and not isinstance(value, str):
+            raise HTTPException(status_code=422, detail=f"{key} must be a string.")
+    if "status" in updates and updates["status"] not in (None, "Saved", "Applied", "Interview", "Offer", "Rejected"):
+        raise HTTPException(status_code=422, detail="Invalid application status.")
+    status = updates.get("status")
+    priority = updates.get("priority")
+    deadline = updates.get("deadline")
+    notes = updates.get("notes")
     if not SessionLocal:
         raise HTTPException(
             status_code=500,
