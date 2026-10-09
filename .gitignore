@@ -1,0 +1,31 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+venv/
+venv312/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Next.js / Node
+node_modules/
+.next/
+out/
+dist/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# User uploads and generated files
+uploads/
+generated/
+*.pdf
+
+# Miscellaneous
+.DS_Store
+*.log

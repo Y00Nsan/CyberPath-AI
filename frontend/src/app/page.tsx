@@ -1,8 +1,31 @@
 "use client";
 
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 
-const API = "http://127.0.0.1:8000";
+const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+
+type IntelligenceProfile = {
+  skill_count?: number;
+  skills?: { name?: string; category?: string; nice?: string }[];
+  category_coverage?: { category?: string; count?: number }[];
+  strength_signals?: string[];
+  development_signals?: string[];
+  privacy?: string;
+};
+
+type IntelligenceResult = {
+  scoring?: {
+    fit_score?: number;
+    skill_match?: number;
+    cybersecurity_relevance?: number;
+    strong_match_count?: number;
+    partial_match_count?: number;
+    missing_skill_count?: number;
+  };
+  strong_matches?: { name?: string; category?: string }[];
+  partial_matches?: { name?: string; category?: string }[];
+  missing_skills?: { name?: string; category?: string; nice?: string }[];
+};
 
 type Job = {
   id?: string;
@@ -11,6 +34,8 @@ type Job = {
   location?: string;
   url?: string;
   description?: string;
+  created?: string;
+  application_deadline?: string;
 
   fit_score?: number;
   cybersecurity_relevance?: number;
@@ -29,6 +54,10 @@ type Job = {
   strong_matches?: string[];
   partial_matches?: string[];
   missing_skills?: string[];
+  required_skill_ids?: string[];
+  matched_skill_ids?: string[];
+  missing_skill_ids?: string[];
+  data_quality?: any;
 
   skill_gap_priority?: {
     skill?: string;
@@ -727,17 +756,22 @@ function RoadmapList({ items }: { items?: RoadmapPhase[] }) {
 
 export default function Home() {
   const [resumeFile, setResumeFile] = useState<File | null>(null);
+  const [resumeUploadStatus, setResumeUploadStatus] = useState("");
+  const resumePickerRef = useRef<HTMLInputElement>(null);
+  const [employmentType, setEmploymentType] = useState("all");
+  const [companyFilter, setCompanyFilter] = useState("");
   const [resumeText, setResumeText] = useState("");
   const [profile, setProfile] = useState("");
 
-  const [targetRole, setTargetRole] = useState(
-    "Cybersecurity Analyst / Cloud Security Intern"
-  );
+  const [targetRole, setTargetRole] = useState("");
+  const [expandedJobIds, setExpandedJobIds] = useState<string[]>([]);
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
 
   // STEP 30 — Job Search Intelligence filters
   const [jobLocation, setJobLocation] = useState("");
-  const [minFitScore, setMinFitScore] = useState(70);
-  const [minCybersecurityRelevance, setMinCybersecurityRelevance] = useState(50);
+  const [jobSearchNotice, setJobSearchNotice] = useState("");
+  const [minFitScore, setMinFitScore] = useState(0);
+  const [minCybersecurityRelevance, setMinCybersecurityRelevance] = useState(0);
 
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
@@ -757,6 +791,10 @@ export default function Home() {
   const [applicationReadinessGate, setApplicationReadinessGate] = useState<ApplicationReadinessGate | null>(null);
   const [applicationFollowUpCopilot, setApplicationFollowUpCopilot] = useState<ApplicationFollowUpCopilot | null>(null);
   const [careerOutcomeIntelligence, setCareerOutcomeIntelligence] = useState<CareerOutcomeIntelligence | null>(null);
+  const [adaptiveOutcomes, setAdaptiveOutcomes] = useState<any | null>(null);
+  const [fitCalibration, setFitCalibration] = useState<any | null>(null);
+  const [jobQuality, setJobQuality] = useState<any | null>(null);
+  const [careerIntelligenceV2, setCareerIntelligenceV2] = useState<any | null>(null);
   const [evidenceNotes, setEvidenceNotes] = useState<Record<string, string>>({});
   const [sprintWeek, setSprintWeek] = useState(1);
   const [completedSprintActions, setCompletedSprintActions] = useState<Record<string, boolean>>({});
@@ -773,23 +811,33 @@ export default function Home() {
     useState<InterviewIntelligence | null>(null);
   const [mockInterview, setMockInterview] = useState<MockInterviewSession | null>(null);
   const [mockIndex, setMockIndex] = useState(0);
+  const [feedbackFlipped, setFeedbackFlipped] = useState(false);
+  const [tailoredPdfUrl, setTailoredPdfUrl] = useState("");
   const [mockAnswer, setMockAnswer] = useState("");
+  const [mockAnswers, setMockAnswers] = useState<Record<number, string>>({});
+  const [mockEvaluations, setMockEvaluations] = useState<Record<number, MockInterviewEvaluation>>({});
   const [mockEvaluation, setMockEvaluation] = useState<MockInterviewEvaluation | null>(null);
   const [mockScores, setMockScores] = useState<number[]>([]);
   const [mockCompleted, setMockCompleted] = useState(false);
   const [mockScoreDetails, setMockScoreDetails] = useState<any[]>([]);
   const [interviewHistory, setInterviewHistory] = useState<InterviewHistory | null>(null);
   const [applicationDecision, setApplicationDecision] = useState<ApplicationDecisionEngine | null>(null);
+  const [intelligenceResult, setIntelligenceResult] = useState<IntelligenceResult | null>(null);
+  const [intelligenceProfile, setIntelligenceProfile] = useState<IntelligenceProfile | null>(null);
+  const [intelligenceBusy, setIntelligenceBusy] = useState(false);
+  const [intelligenceOverview, setIntelligenceOverview] = useState<any | null>(null);
+  const [learningState, setLearningState] = useState<any | null>(null);
 
 
   const [applications, setApplications] = useState<Application[]>([]);
+  const [jobPrepTab, setJobPrepTab] = useState<"resume" | "interview">("resume");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [applicationAnalytics, setApplicationAnalytics] = useState<ApplicationAnalytics | null>(null);
 
   const [statusFilter, setStatusFilter] = useState("All");
   const [searchFilter, setSearchFilter] = useState("");
 
-  const [activeSection, setActiveSection] = useState("dashboard");
+  const [activeSection, setActiveSection] = useState("command-center");
 
   const [loading, setLoading] = useState<LoadingState>({});
   const [error, setError] = useState("");
@@ -805,26 +853,47 @@ export default function Home() {
     path: string,
     options?: RequestInit
   ): Promise<any> {
-    const response = await fetch(`${API}${path}`, options);
+    const url = `${API}${path}`;
 
-    if (!response.ok) {
-      let message = `Request failed: ${response.status}`;
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          ...(options?.body instanceof FormData
+            ? {}
+            : { "Content-Type": "application/json" }),
+          ...(options?.headers || {}),
+        },
+      });
 
-      try {
-        const body = await response.json();
-        message = body.detail || body.error || message;
-      } catch {
-        // Ignore JSON parsing failure.
+      if (!response.ok) {
+        let message = `Request failed: ${response.status}`;
+
+        try {
+          const body = await response.json();
+          message = body.detail || body.error || message;
+        } catch {
+          // Ignore JSON parsing failure.
+        }
+
+        throw new Error(message);
       }
 
-      throw new Error(message);
-    }
+      return response.json();
+    } catch (error) {
+      console.error(`[CyberPath API] ${url}`, error);
 
-    return response.json();
+      if (error instanceof TypeError) {
+        throw new Error(
+          `Cannot connect to CyberPath backend at ${API}. Make sure the backend is running on port 8000.`
+        );
+      }
+
+      throw error;
+    }
   }
 
   function showError(message: string) {
-    console.error(message);
     setError(message);
 
     window.setTimeout(() => {
@@ -832,32 +901,122 @@ export default function Home() {
     }, 7000);
   }
 
-  async function uploadResume() {
-    if (!resumeFile) {
-      showError("Please select a PDF resume first.");
+  async function runIntelligenceOverview() {
+    const candidateText = `${resumeText}\n${profile}`.trim();
+    if (!candidateText) {
+      showError("Upload and analyze your resume first.");
       return;
     }
+    setIntelligenceBusy(true);
+    try {
+      const data = await apiFetch("/intelligence/overview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candidate_text: candidateText,
+          jobs: jobs.map((job) => ({
+            title: job.title,
+            description: job.description,
+            summary: job.summary,
+          })),
+        }),
+      });
+      setIntelligenceOverview(data);
+    } catch (error: any) {
+      showError(error.message || "Career intelligence engine failed.");
+    } finally {
+      setIntelligenceBusy(false);
+    }
+  }
 
+  async function refreshCareerIntelligenceV2() {
+    try {
+      const [calibration, quality, career] = await Promise.all([
+        apiFetch("/intelligence/calibration"),
+        apiFetch("/intelligence/job-quality"),
+        apiFetch("/intelligence/career"),
+      ]);
+      setFitCalibration(calibration);
+      setJobQuality(quality);
+      setCareerIntelligenceV2(career);
+    } catch (error: any) {
+      showError(error.message || "Career intelligence refresh failed.");
+    }
+  }
+
+  async function loadLearningState() {
+    try {
+      const data = await apiFetch("/intelligence/learning-state");
+      setLearningState(data);
+    } catch (error: any) {
+      showError(error.message || "Could not load intelligence learning state.");
+    }
+  }
+
+  async function runIntelligenceProfile() {
+    const candidateText = `${resumeText}\n${profile}`.trim();
+    if (!candidateText) {
+      showError("Upload and analyze your resume first.");
+      return;
+    }
+    setIntelligenceBusy(true);
+    try {
+      const data = await apiFetch("/intelligence/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidate_text: candidateText }),
+      });
+      setIntelligenceProfile(data);
+    } catch (error: any) {
+      showError(error.message || "Cybersecurity profile engine failed.");
+    } finally {
+      setIntelligenceBusy(false);
+    }
+  }
+
+  async function runCybersecurityEngine() {
+    const candidateText = `${resumeText}\n${profile}`.trim();
+    const jobText = selectedJob?.description || `${targetRole} ${selectedJob?.title || ""}`;
+    if (!candidateText) {
+      showError("Upload and analyze your resume first.");
+      return;
+    }
+    setIntelligenceBusy(true);
+    try {
+      const data = await apiFetch("/intelligence/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidate_text: candidateText, job_text: jobText }),
+      });
+      setIntelligenceResult(data);
+    } catch (error: any) {
+      showError(error.message || "Cybersecurity Intelligence Engine failed.");
+    } finally {
+      setIntelligenceBusy(false);
+    }
+  }
+
+  async function uploadResume(file?: File) {
+    const selectedFile = file || resumeFile;
+    if (!selectedFile) return;
     setBusy("upload", true);
-
+    setResumeUploadStatus("Uploading and analyzing your resume…");
     try {
       const formData = new FormData();
-      formData.append("file", resumeFile);
-
-      const data = await apiFetch("/upload-resume", {
-        method: "POST",
-        body: formData,
-      });
-
-      setResumeText(data.text || data.resume_text || "");
-
-      if (data.profile) {
-        setProfile(data.profile);
-      }
-
-      setActiveSection("resume");
+      formData.append("file", selectedFile);
+      const data = await apiFetch("/upload-resume", { method: "POST", body: formData });
+      const extracted = data.text || data.resume_text || "";
+      if (!extracted.trim()) throw new Error("No readable text was found in this PDF.");
+      setResumeText(extracted);
+      setProfile("");
+      const analysisForm = new FormData();
+      analysisForm.append("resume_text", extracted);
+      const analysis = await apiFetch("/analyze-resume", { method: "POST", body: analysisForm });
+      setProfile(typeof analysis === "string" ? analysis : JSON.stringify(analysis, null, 2));
+      setResumeUploadStatus("✓ Resume uploaded and analyzed. Choose a role below.");
     } catch (error: any) {
-      showError(error.message || "Resume upload failed.");
+      setResumeUploadStatus("Resume processing failed. Choose your PDF to retry.");
+      showError(error.message || "Resume upload or analysis failed.");
     } finally {
       setBusy("upload", false);
     }
@@ -892,20 +1051,38 @@ export default function Home() {
     }
   }
 
+  async function ensureResumeProfile() {
+    if (profile.trim()) return profile;
+    if (!resumeText.trim()) return "";
+
+    const formData = new FormData();
+    formData.append("resume_text", resumeText);
+    const data = await apiFetch("/analyze-resume", { method: "POST", body: formData });
+    const generated = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    setProfile(generated);
+    return generated;
+  }
+
   async function searchJobs() {
+    if (!targetRole.trim()) { showError("Enter a target cybersecurity role first."); jumpToSection("resume"); return; }
+    if (!resumeText.trim() && !profile.trim()) { showError("Upload your resume first. CyberPath will analyze it automatically before searching."); jumpToSection("resume"); return; }
+    setJobSearchNotice("");
     setBusy("searchJobs", true);
 
     try {
+      const activeProfile = await ensureResumeProfile();
       const formData = new FormData();
 
       formData.append("target_role", targetRole);
-      formData.append("resume_profile", profile);
+      formData.append("resume_profile", activeProfile);
       formData.append("location", jobLocation);
       formData.append("min_fit_score", String(minFitScore));
       formData.append("min_cybersecurity_relevance", String(minCybersecurityRelevance));
       formData.append("max_jobs", "20");
+      formData.append("employment_type", employmentType);
+      formData.append("company_name", companyFilter.trim());
 
-      const data = await apiFetch("/search-and-analyze-jobs", {
+      const data = await apiFetch("/intelligence/job-search", {
         method: "POST",
         body: formData,
       });
@@ -915,74 +1092,79 @@ export default function Home() {
         : data.jobs || data.results || [];
 
       setJobs(result);
-      setActiveSection("jobs");
+      setActiveSection("command-center");
+      window.setTimeout(() => document.getElementById("job-results")?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+      setJobSearchNotice(result.length ? (data?.expanded_location ? "No local matches were found, so results include a wider geographic area. Check each job location before applying." : "") : (data?.source_message || "No live matches. Try another role or remove the location filter."));
+      if (!result.length) {
+        const msg = data?.source_message || (Array.isArray(data?.source_errors) && data.source_errors.length ? data.source_errors.join(" | ") : "No matching jobs found. Try a broader role, location, or lower score filters.");
+        setJobSearchNotice(msg);
+        return;
+      }
     } catch (error: any) {
-      showError(error.message || "Job search failed.");
+      setJobs([]);
+      setJobSearchNotice(error.message || "Job search failed. Check the backend connection.");
     } finally {
       setBusy("searchJobs", false);
     }
   }
 
-  async function analyzeSelectedJob() {
-    if (!selectedJob) {
-      showError("Select a job first.");
-      return;
-    }
-
-    setBusy("analyzeJob", true);
-
-    try {
-      const formData = new FormData();
-
-      formData.append(
-        "job_description",
-        selectedJob.description || ""
-      );
-
-      formData.append("resume_profile", profile);
-
-      const data = await apiFetch("/analyze-job", {
-        method: "POST",
-        body: formData,
-      });
-
-      setJobAnalysis(data);
-      setActiveSection("job-detail");
-    } catch (error: any) {
-      showError(error.message || "Job analysis failed.");
-    } finally {
-      setBusy("analyzeJob", false);
-    }
+  
+async function analyzeSelectedJob() {
+  if (!selectedJob) {
+    showError("Select a job first.");
+    return;
   }
 
+  if (!resumeText.trim() && !profile.trim()) {
+    showError("Upload your resume first. CyberPath can analyze it automatically.");
+    jumpToSection("resume");
+    return;
+  }
+
+  setBusy("analyzeJob", true);
+
+  try {
+    const activeProfile = await ensureResumeProfile();
+
+    if (!activeProfile.trim()) {
+      throw new Error("Resume analysis returned an empty profile.");
+    }
+
+    const formData = new FormData();
+    formData.append("job_description", selectedJob.description || "");
+    formData.append("resume_profile", activeProfile);
+    formData.append("job_title", selectedJob.title || "Job");
+    formData.append("company", selectedJob.company || "");
+
+    const data = await apiFetch("/analyze-job", {
+      method: "POST",
+      body: formData,
+    });
+
+    setJobAnalysis(data);
+    setActiveSection("job-detail");
+  } catch (error: any) {
+    showError(error.message || "Job analysis failed.");
+  } finally {
+    setBusy("analyzeJob", false);
+  }
+}
+
   async function runSkillGap() {
-    if (!selectedJob) {
-      showError("Select a job first.");
-      return;
-    }
-
+    if (!selectedJob) { showError("Choose a job first."); jumpToSection("jobs"); return; }
     setBusy("skillGap", true);
-
     try {
+      const activeProfile = await ensureResumeProfile();
+      if (!activeProfile.trim()) { showError("Upload and analyze your resume first."); jumpToSection("resume"); return; }
       const formData = new FormData();
-
-      formData.append("resume_profile", profile);
-      formData.append(
-        "job_description",
-        selectedJob.description || ""
-      );
-
-      const data = await apiFetch("/skill-gap", {
-        method: "POST",
-        body: formData,
-      });
-
+      formData.append("resume_profile", activeProfile);
+      formData.append("job_title", selectedJob.title || targetRole || "Target role");
+      formData.append("job_description", selectedJob.description || "");
+      const data = await apiFetch("/skill-gap", { method: "POST", body: formData });
       setSkillGap(data);
-    } catch (error: any) {
-      showError(error.message || "Skill gap analysis failed.");
-    } finally {
-      setBusy("skillGap", false);
-    }
+      jumpToSection("job-detail");
+    } catch (error: any) { showError(error.message || "Skill analysis failed."); }
+    finally { setBusy("skillGap", false); }
   }
 
   async function getCareerAdvice() {
@@ -1019,10 +1201,9 @@ export default function Home() {
       const formData = new FormData();
 
       formData.append("resume_text", resumeText);
-      formData.append(
-        "job_description",
-        selectedJob.description || ""
-      );
+      formData.append("job_title", selectedJob.title || targetRole);
+      formData.append("company", selectedJob.company || "");
+      formData.append("job_description", selectedJob.description || "");
 
       const data = await apiFetch("/tailor-resume", {
         method: "POST",
@@ -1036,7 +1217,16 @@ export default function Home() {
           JSON.stringify(data, null, 2)
       );
 
-      setActiveSection("resume-tailor");
+      const pdfForm = new FormData();
+      pdfForm.append("original_resume", resumeText);
+      pdfForm.append("tailored_resume", data.tailored_resume || data.resume || data.text || "");
+      pdfForm.append("job_title", selectedJob.title || targetRole);
+      pdfForm.append("company", selectedJob.company || "");
+      const pdfResponse = await fetch(`${API}/tailor-resume/pdf`, { method: "POST", body: pdfForm });
+      if (!pdfResponse.ok) { const detail = await pdfResponse.text().catch(() => ""); throw new Error(`PDF preview failed (${pdfResponse.status}). ${detail.slice(0, 250)}`); }
+      const pdfBlob = await pdfResponse.blob();
+      setTailoredPdfUrl(previous => { if (previous) URL.revokeObjectURL(previous); return URL.createObjectURL(pdfBlob); });
+      setActiveSection("job-prep");
     } catch (error: any) {
       showError(error.message || "Resume tailoring failed.");
     } finally {
@@ -1066,7 +1256,7 @@ export default function Home() {
 
       formData.append("missing_skills", missingSkills);
 
-      const data = await apiFetch("/learning-recommendations", {
+      const data = await apiFetch("/intelligence/learning-plan", {
         method: "POST",
         body: formData,
       });
@@ -1299,28 +1489,29 @@ export default function Home() {
 
 
   async function generateCareerOutcomeIntelligence() {
-    if (!profile.trim()) { showError("Analyze your resume first."); return; }
-    if (!targetRole.trim()) { showError("Enter a target cybersecurity role first."); return; }
-    if (!applications.length) { showError("Save or apply to at least one job first so the system has outcome data."); return; }
     setBusy("careerOutcomeIntelligence", true);
     try {
-      const formData = new FormData();
-      formData.append("resume_profile", profile);
-      formData.append("target_role", targetRole);
-      formData.append("jobs_data", JSON.stringify(jobs));
-      formData.append("applications_data", JSON.stringify(applications));
-      formData.append("application_analytics", JSON.stringify(applicationAnalytics || {}));
-      formData.append("interview_analytics", JSON.stringify(interviewHistory || applicationAnalytics || {}));
-      formData.append("career_intelligence", JSON.stringify(careerIntelligence || {}));
-      formData.append("application_decision", JSON.stringify(applicationDecision || {}));
-      const data = await apiFetch("/career-outcome-intelligence", { method: "POST", body: formData });
-      if (data?.error) throw new Error(data.error);
+      const data = await apiFetch("/intelligence/outcomes");
       setCareerOutcomeIntelligence(data);
+      setAdaptiveOutcomes(data);
       setActiveSection("career-outcomes");
     } catch (error: any) {
-      showError(error.message || "Career outcome intelligence failed.");
-    } finally { setBusy("careerOutcomeIntelligence", false); }
+      showError(error.message || "Adaptive career intelligence failed.");
+    } finally {
+      setBusy("careerOutcomeIntelligence", false);
+    }
   }
+
+  async function refreshAdaptiveIntelligence() {
+    try {
+      const data = await apiFetch("/intelligence/outcomes");
+      setAdaptiveOutcomes(data);
+      setCareerOutcomeIntelligence(data);
+    } catch (error: any) {
+      showError(error.message || "Adaptive intelligence failed.");
+    }
+  }
+
 
 
   async function generateNiceSkillMapping() {
@@ -1602,25 +1793,30 @@ export default function Home() {
   }
 
   async function startMockInterview() {
-    if (!selectedJob) { showError("Select a job first."); return; }
-    if (!profile.trim()) { showError("Analyze your resume first."); return; }
+    if (!resumeText.trim() && !profile.trim()) { showError("Upload your resume first. CyberPath will analyze it automatically before interview coaching."); jumpToSection("resume"); return; }
+    if (!selectedJob) { showError("Select a job first so the 5 questions are tailored to the actual posting."); jumpToSection("jobs"); return; }
     setBusy("mockInterview", true);
     try {
+      const activeProfile = await ensureResumeProfile();
       const formData = new FormData();
-      formData.append("resume_profile", profile);
+      formData.append("resume_profile", activeProfile);
       formData.append("target_role", targetRole);
       formData.append("job_data", JSON.stringify(selectedJob));
       formData.append("interview_plan", JSON.stringify(interviewIntelligence || {}));
       const data = await apiFetch("/mock-interview/start", { method: "POST", body: formData });
       if (data?.error) throw new Error(data.error);
+      if (!Array.isArray(data.questions) || data.questions.length !== 10) throw new Error("Interview service did not return 10 questions. Please try again.");
       setMockInterview(data);
+      setFeedbackFlipped(false);
       setMockIndex(0);
       setMockAnswer("");
+      setMockAnswers({});
+      setMockEvaluations({});
       setMockEvaluation(null);
       setMockScores([]);
       setMockScoreDetails([]);
       setMockCompleted(false);
-      setActiveSection("mock-interview");
+      setActiveSection("job-prep");
     } catch (error: any) {
       showError(error.message || "Mock interview could not start.");
     } finally { setBusy("mockInterview", false); }
@@ -1643,15 +1839,18 @@ export default function Home() {
       const data = await apiFetch("/mock-interview/evaluate", { method: "POST", body: formData });
       if (data?.error) throw new Error(data.error);
       setMockEvaluation(data);
-      setMockScores((previous) => [...previous, Number(data?.scores?.overall || 0)]);
-      setMockScoreDetails((previous) => [...previous, {
+      setMockAnswers(previous => ({ ...previous, [mockIndex]: mockAnswer }));
+      setMockEvaluations(previous => ({ ...previous, [mockIndex]: data }));
+      setFeedbackFlipped(false);
+      setMockScores((previous) => { const updated = [...previous]; updated[mockIndex] = Number(data?.scores?.overall || 0); return updated; });
+      setMockScoreDetails((previous) => { const updated = [...previous]; updated[mockIndex] = {
         overall: Number(data?.scores?.overall || 0),
         technical_accuracy: Number(data?.scores?.technical_accuracy || 0),
         cybersecurity_reasoning: Number(data?.scores?.cybersecurity_reasoning || 0),
         communication: Number(data?.scores?.communication || 0),
         structure: Number(data?.scores?.structure || 0),
         category: question.category || "Technical",
-      }]);
+      }; return updated; });
     } catch (error: any) {
       showError(error.message || "Answer evaluation failed.");
     } finally { setBusy("mockEvaluate", false); }
@@ -1688,42 +1887,62 @@ export default function Home() {
       await saveCompletedInterview();
       return;
     }
-    setMockIndex((previous) => previous + 1);
-    setMockAnswer("");
-    setMockEvaluation(null);
+    const next = mockIndex + 1;
+    setMockIndex(next);
+    setMockAnswer(mockAnswers[next] || "");
+    setMockEvaluation(mockEvaluations[next] || null);
+    setFeedbackFlipped(false);
+  }
+
+  function previousMockQuestion() {
+    if (mockIndex <= 0) return;
+    const previous = mockIndex - 1;
+    setMockIndex(previous);
+    setMockAnswer(mockAnswers[previous] || "");
+    setMockEvaluation(mockEvaluations[previous] || null);
+    setFeedbackFlipped(false);
+  }
+
+  function isJobSaved(job: Job) {
+    return applications.some(application =>
+      (job.url && application.url && application.url === job.url) ||
+      (application.job_title || "").trim().toLowerCase() === (job.title || "").trim().toLowerCase() &&
+      (application.company || "").trim().toLowerCase() === (job.company || "").trim().toLowerCase()
+    );
   }
 
   async function saveJob(job: Job) {
-    setBusy(`save-${job.id || job.title}`, true);
-
+    const busyKey = `save-${job.id || job.title}`;
+    setBusy(busyKey, true);
     try {
-      const body = {
-        job_title: job.title || "Untitled Job",
-        company: job.company || "",
-        location: job.location || "",
-        url: job.url || "",
-        fit_score: Number(job.fit_score || 0),
-        status: "Saved",
-        deadline: "",
-        notes: "",
-      };
-
-      await apiFetch("/applications", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-      });
-
-      await loadApplications();
-      await loadDashboard();
-      await loadApplicationAnalytics();
+      const existing = applications.find(application =>
+        (job.url && application.url && application.url === job.url) ||
+        (application.job_title || "").trim().toLowerCase() === (job.title || "").trim().toLowerCase() &&
+        (application.company || "").trim().toLowerCase() === (job.company || "").trim().toLowerCase()
+      );
+      if (existing) {
+        await apiFetch(`/applications/${existing.id}`, { method: "DELETE" });
+      } else {
+        await apiFetch("/applications", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            job_title: job.title || "Untitled Job", company: job.company || "",
+            location: job.location || "", url: job.url || "",
+            fit_score: Number(job.fit_score || 0),
+            cybersecurity_relevance: Number(job.cybersecurity_relevance || 0),
+            career_value: Number(job.career_value || 0),
+            required_skill_ids: job.required_skill_ids || [],
+            matched_skill_ids: job.matched_skill_ids || [],
+            missing_skill_ids: job.missing_skill_ids || [],
+            status: "Saved", deadline: "", notes: "",
+          }),
+        });
+      }
+      await Promise.all([loadApplications(), loadDashboard(), loadApplicationAnalytics()]);
     } catch (error: any) {
-      showError(error.message || "Could not save job.");
-    } finally {
-      setBusy(`save-${job.id || job.title}`, false);
-    }
+      showError(error.message || "Could not update saved application.");
+    } finally { setBusy(busyKey, false); }
   }
 
   async function loadApplications() {
@@ -2225,11 +2444,47 @@ export default function Home() {
     setSelectedJob(job);
     setJobAnalysis(null);
     setSkillGap(null);
-    setActiveSection("job-detail");
+    setTailoredResume("");
+    setMockInterview(null);
+    setMockEvaluation(null);
+    setMockCompleted(false);
+    setJobPrepTab("resume");
+    setActiveSection("job-prep");
   }
 
+  const sectionGroups: Record<string, string> = {
+    "command-center": "command-center", resume: "resume", "resume-tailor": "resume",
+    jobs: "jobs", "job-detail": "jobs", applications: "applications",
+    "application-tracker": "applications", "application-analytics": "applications",
+    "application-pipeline": "applications", "application-readiness": "applications",
+    "application-follow-up": "applications", "application-copilot": "applications",
+    "application-decision": "applications", "mock-interview": "applications",
+    "interview-intelligence": "applications", "interview-history": "applications",
+    "job-prep": "job-prep",
+    "career-intelligence": "job-prep", learning: "job-prep",
+    roadmap: "career-intelligence", "90-day-plan": "career-intelligence",
+    "career-sprint": "career-intelligence", nice: "career-intelligence",
+    "career-evidence": "career-intelligence", "cybersecurity-portfolio": "career-intelligence",
+    "portfolio-audit": "career-intelligence", "career-outcomes": "career-intelligence",
+    dashboard: "command-center"
+  };
+  const currentGroup = sectionGroups[activeSection] || "command-center";
+  const navigationItems = [
+    { id: "command-center", icon: "⌂", title: "Start here", detail: "Resume → Jobs → Fit" },
+    { id: "applications", icon: "✓", title: "Applications", detail: "Manage applications" },
+    { id: "job-prep", icon: "✦", title: "Job Preparation", detail: "Resume & interview practice" }
+  ];
+  const currentTools: { id: string; title: string }[] = [];
+
   function jumpToSection(section: string) {
+    // Resume and job discovery are part of the same continuous Start here journey.
+    if (section === "resume" || section === "jobs") {
+      setActiveSection("command-center");
+      window.setTimeout(() => document.getElementById(section === "jobs" ? "job-results" : "command-center")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+      return;
+    }
     setActiveSection(section);
+    window.scrollTo({ top: 0, behavior: "smooth" });
 
     window.setTimeout(() => {
       document
@@ -2239,6 +2494,17 @@ export default function Home() {
           block: "start",
         });
     }, 50);
+  }
+
+  function getSectionLabel(section: string) {
+    const labels: Record<string, string> = {
+      "job-prep": "Job Preparation", "command-center": "Overview", resume: "Resume Builder", jobs: "Jobs · Market Intelligence", "job-detail": "Jobs · Selected Job",
+      "career-intelligence": "Career Development", learning: "Growth · Learning", roadmap: "Growth · Career Roadmap", "90-day-plan": "Growth · 90-Day Plan", "career-sprint": "Growth · Career Sprint",
+      applications: "Job Tracker", "application-pipeline": "Applications · Package", "application-readiness": "Applications · Readiness Gate", "application-follow-up": "Applications · Follow-up", "application-copilot": "Applications · Copilot", "application-decision": "Applications · Decision Engine", "application-tracker": "Applications · Deadline Tracker", "application-analytics": "Applications · Analytics",
+      "mock-interview": "Interview · Mock Interview", "interview-intelligence": "Interview · Intelligence", "interview-history": "Interview · Analytics",
+      dashboard: "More Tools · Dashboard", nice: "More Tools · NICE Skill Map", "career-evidence": "More Tools · Evidence", "cybersecurity-portfolio": "More Tools · Portfolio Builder", "portfolio-audit": "More Tools · Portfolio Audit", "career-outcomes": "More Tools · Career Outcomes", "resume-tailor": "More Tools · Resume Tailor"
+    };
+    return labels[section] || "CyberPath AI";
   }
 
   return (
@@ -2287,6 +2553,20 @@ export default function Home() {
             ),
             #07111f;
         }
+
+        .is-hidden { display: none !important; }
+        .topbar-context { display:flex; align-items:center; gap:9px; min-width:0; }
+        .current-section-dot { width:8px; height:8px; border-radius:50%; background:#1677ff; box-shadow:0 0 0 4px rgba(22,119,255,.10); flex:0 0 auto; }
+        .current-section-label { font-size:12px; font-weight:800; color:#175cd3; white-space:nowrap; }
+        .topbar-role { max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#667085; font-size:11px; padding-left:9px; border-left:1px solid #d9e2ec; }
+        .secondary-nav .nav-button.active { color:#175cd3 !important; background:#eaf3ff !important; border-color:#b7d3f7 !important; box-shadow:inset 3px 0 0 #1677ff !important; }
+        .market-workflow { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:14px; }
+        .market-step { display:flex; gap:12px; align-items:flex-start; text-align:left; border:1px solid #d9e2ec; background:#fff; border-radius:14px; padding:15px; color:#101828; transition:.18s ease; }
+        .market-step:hover { transform:translateY(-2px); border-color:#8fb7e8; box-shadow:0 10px 24px rgba(16,24,40,.07); }
+        .market-step-number { width:28px; height:28px; display:grid; place-items:center; border-radius:50%; background:#eaf3ff; color:#175cd3; font-weight:800; flex:0 0 auto; }
+        .market-step strong, .market-step small { display:block; } .market-step strong { font-size:13px; margin-bottom:5px; } .market-step small { color:#667085; line-height:1.45; font-size:11px; }
+        .market-step-active { border-color:#8fb7e8; box-shadow:0 6px 20px rgba(37,99,235,.06); }
+        @media(max-width:900px){ .market-workflow{grid-template-columns:1fr;} .topbar-role{display:none;} }
 
         .topbar {
           position: sticky;
@@ -3288,6 +3568,190 @@ export default function Home() {
             width: 70px;
           }
         }
+
+        /* Teal-inspired visual refresh: calm green accents, white surfaces, clear hierarchy */
+        :global(body) {
+          background: #f6f8f7 !important;
+          color: #172b27 !important;
+          font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+        }
+        .topbar {
+          background: rgba(255,255,255,.96) !important;
+          color: #172b27 !important;
+          border-bottom: 1px solid #e2e9e6 !important;
+          box-shadow: 0 1px 2px rgba(20,50,40,.03) !important;
+        }
+        .brand, .brand-sub, .topbar-context, .current-section-label, .topbar-role {
+          color: #172b27 !important;
+        }
+        .brand-mark {
+          background: #d8f3e8 !important;
+          color: #087f5b !important;
+          border: 1px solid #b9e8d5 !important;
+          border-radius: 10px !important;
+        }
+        .layout {
+          background: #f6f8f7 !important;
+        }
+        .sidebar {
+          background: #ffffff !important;
+          border-right: 1px solid #e2e9e6 !important;
+        }
+        .nav-label, .sidebar-hint, .eyebrow, .mini-label {
+          color: #6b817a !important;
+        }
+        .nav-button {
+          color: #52665f !important;
+          border-radius: 9px !important;
+          transition: background .16s ease, color .16s ease, transform .16s ease !important;
+        }
+        .nav-button:hover {
+          background: #f0f7f3 !important;
+          color: #087f5b !important;
+          transform: translateX(1px);
+        }
+        .nav-button.active {
+          background: #e5f6ed !important;
+          color: #087f5b !important;
+          font-weight: 650 !important;
+          box-shadow: inset 3px 0 0 #15966a !important;
+        }
+        .sidebar-status {
+          color: #52665f !important;
+          border-top: 1px solid #e8efec !important;
+        }
+        .status-dot, .current-section-dot {
+          background: #15966a !important;
+        }
+        .main {
+          background: #f6f8f7 !important;
+        }
+        .hero {
+          background: #ffffff !important;
+          color: #172b27 !important;
+          border: 1px solid #e2e9e6 !important;
+          border-radius: 18px !important;
+          box-shadow: 0 4px 18px rgba(25,55,45,.035) !important;
+        }
+        .hero h1, .section-header h2, .step43-hero-copy h2 {
+          color: #172b27 !important;
+          letter-spacing: -.035em !important;
+        }
+        .hero p, .section-header p, .muted {
+          color: #63766f !important;
+        }
+        .target-box, .card, .stat-card, .job-card, .dashboard-card, .panel {
+          background: #ffffff !important;
+          color: #172b27 !important;
+          border-color: #e2e9e6 !important;
+          border-radius: 14px !important;
+          box-shadow: 0 2px 10px rgba(25,55,45,.025) !important;
+        }
+        input, select, textarea, .textarea {
+          background: #ffffff !important;
+          color: #172b27 !important;
+          border-color: #d7e2dd !important;
+          border-radius: 9px !important;
+        }
+        input:focus, select:focus, textarea:focus, .textarea:focus {
+          outline: 3px solid rgba(21,150,106,.13) !important;
+          border-color: #15966a !important;
+        }
+        .button.primary, button.primary {
+          background: #087f5b !important;
+          color: #ffffff !important;
+          border-color: #087f5b !important;
+          border-radius: 9px !important;
+          box-shadow: none !important;
+        }
+        .button.primary:hover, button.primary:hover {
+          background: #06694b !important;
+          border-color: #06694b !important;
+        }
+        .button, button {
+          transition: background .16s ease, border-color .16s ease, transform .16s ease !important;
+        }
+        .button:not(:disabled):hover, button:not(:disabled):hover {
+          transform: translateY(-1px);
+        }
+        .tag, .priority, .score {
+          border-radius: 999px !important;
+        }
+        .section.is-active {
+          animation: tealFadeIn .22s ease both;
+        }
+        .error {
+          background: #fff5f4 !important;
+          color: #a33228 !important;
+          border-color: #f2c8c3 !important;
+          box-shadow: 0 12px 34px rgba(80,25,20,.10) !important;
+        }
+        .footer {
+          color: #82928c !important;
+        }
+        @keyframes tealFadeIn {
+          from { opacity: 0; transform: translateY(4px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @media (max-width: 760px) {
+          .sidebar {
+            background: #ffffff !important;
+            box-shadow: 0 3px 12px rgba(25,55,45,.04) !important;
+          }
+          .nav-button.active {
+            box-shadow: inset 0 -3px 0 #15966a !important;
+          }
+        }
+
+
+/* Final light-theme rules follow the legacy page styles to prevent cascade conflicts. */
+/* CyberPath AI — unified light theme. Overrides earlier legacy feature styles. */
+:root {
+  --background: #F7F9F8;
+  --foreground: #18332B;
+  --cp-bg: #F7F9F8;
+  --cp-panel: #FFFFFF;
+  --cp-panel-2: #F0F6F3;
+  --cp-line: #DCE7E2;
+  --cp-text: #18332B;
+  --cp-muted: #526B62;
+  --cp-cyan: #087F70;
+  --cp-blue: #087F70;
+  --cp-green: #087F70;
+  --cp-purple: #526B62;
+  --cp-border-strong: #88B9AA;
+}
+html, body, .app-shell, .layout { background: var(--cp-bg); color: var(--cp-text); }
+body { background-image: none; }
+.topbar { background: #FFFFFF; border-bottom: 1px solid var(--cp-line); box-shadow: none; }
+.sidebar { background: #FFFFFF; border-right: 1px solid var(--cp-line); box-shadow: none; }
+.brand-mark { color: #087F70; }
+.brand-sub, .nav-label, .sidebar-hint, .muted, .empty-small { color: var(--cp-muted); }
+.nav-button { color: var(--cp-muted); background: transparent; }
+.nav-button:hover { color: #06675C; background: #F0F6F3; border-color: #DCE7E2; }
+.nav-button.active { color: #087F70; background: #E4F2ED; border-color: #B8D8CB; box-shadow: inset 3px 0 0 #087F70; }
+.tracker-find-jobs { margin-left: 16px; width: calc(100% - 16px); font-size: .88em; }
+.main, h1, h2, h3, h4, h5, h6, .title, .section-title { color: var(--cp-text); }
+.card, .stat-card, .job-card, .panel, .career-intel-dashboard-card, .copilot-selected-job, .interview-selected-job { background: #FFFFFF; color: var(--cp-text); border-color: var(--cp-line); box-shadow: 0 2px 10px rgba(24,51,43,.035); }
+.card:hover, .stat-card:hover, .job-card:hover { border-color: #88B9AA; box-shadow: 0 3px 14px rgba(24,51,43,.07); }
+input, textarea, select, .input, .textarea { background: #FFFFFF; color: var(--cp-text); border-color: #B8CCC3; color-scheme: light; }
+input::placeholder, textarea::placeholder { color: #667D73; }
+input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid #087F70; outline-offset: 2px; }
+.button { background: #FFFFFF; color: var(--cp-text); border-color: #B8CCC3; }
+.button:hover:not(:disabled) { background: #F0F6F3; border-color: #88B9AA; }
+.button.primary { background: #087F70; color: #FFFFFF; border-color: #087F70; box-shadow: none; }
+.button.primary:hover:not(:disabled) { background: #06675C; color: #FFFFFF; border-color: #06675C; }
+.button.secondary { background: #F0F6F3; color: #18332B; }
+button:disabled, .button:disabled { opacity: .55; cursor: not-allowed; }
+.tag { background: #E4F2ED; color: #086B60; }
+.tag.blue { background: #E4F2ED; color: #086B60; }
+.profile-box, pre { background: #F0F6F3; border-color: var(--cp-line); color: var(--cp-text); }
+.skill-bar { background: #DCE7E2; }
+.skill-bar-inner { background: #087F70; }
+.next-action, .career-intel-action, .career-intel-hero, .copilot-decision, .interview-hero, .mock-question-card { background: #F0F6F3; color: var(--cp-text); border-color: var(--cp-line); }
+.career-intel-mini, .career-intel-stat, .copilot-stats > div, .interview-stats > div, .copilot-question, .interview-question, .interview-practice, .career-intel-action-row { background: #F7F9F8; color: var(--cp-text); border-color: var(--cp-line); }
+@media (max-width: 820px) { .sidebar { background: #FFFFFF; border-bottom-color: var(--cp-line); } }
+
       `}</style>
 
       <header className="topbar">
@@ -3303,293 +3767,41 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="muted">
-          {targetRole}
-        </div>
+        <div className="topbar-context"><span className="current-section-dot" /><span className="current-section-label">{getSectionLabel(activeSection)}</span>{targetRole && <span className="topbar-role">{targetRole}</span>}</div>
       </header>
 
       <div className="layout">
         <aside className="sidebar">
-          <div className="nav-label">
-            Workspace
+          <div className="sidebar-head">
+            <div className="nav-label">WORKSPACE</div>
+            <div className="sidebar-hint">Start with the next thing you need.</div>
           </div>
 
-          <button
-            className={`nav-button ${
-              activeSection === "dashboard"
-                ? "active"
-                : ""
-            }`}
-            onClick={() =>
-              jumpToSection("dashboard")
-            }
-          >
-            Dashboard
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "command-center" ? "active" : ""
-            }`}
-            onClick={() => jumpToSection("command-center")}
-          >
-            Career Command Center
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "application-analytics" ? "active" : ""
-            }`}
-            onClick={() => jumpToSection("application-analytics")}
-          >
-            Application Analytics
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "resume"
-                ? "active"
-                : ""
-            }`}
-            onClick={() =>
-              jumpToSection("resume")
-            }
-          >
-            Resume Intelligence
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "jobs"
-                ? "active"
-                : ""
-            }`}
-            onClick={() =>
-              jumpToSection("jobs")
-            }
-          >
-            Job Intelligence
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "job-detail"
-                ? "active"
-                : ""
-            }`}
-            onClick={() =>
-              jumpToSection("job-detail")
-            }
-          >
-            Selected Job
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "learning"
-                ? "active"
-                : ""
-            }`}
-            onClick={() =>
-              jumpToSection("learning")
-            }
-          >
-            Learning
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "roadmap"
-                ? "active"
-                : ""
-            }`}
-            onClick={() =>
-              jumpToSection("roadmap")
-            }
-          >
-            Career Strategy
-          </button>
-
-          <button
-            className={`nav-button ${activeSection === "90-day-plan" ? "active" : ""}`}
-            onClick={() => jumpToSection("90-day-plan")}
-          >
-            90-Day Career Plan
-          </button>
-
-          <button
-            className={`nav-button ${activeSection === "career-sprint" ? "active" : ""}`}
-            onClick={() => jumpToSection("career-sprint")}
-          >
-            AI Career Sprint
-          </button>
-
-          <button className={`nav-button ${activeSection === "career-evidence" ? "active" : ""}`} onClick={() => jumpToSection("career-evidence")}>
-            Career Evidence
-          </button>
-
-          <button className={`nav-button ${activeSection === "cybersecurity-portfolio" ? "active" : ""}`} onClick={() => jumpToSection("cybersecurity-portfolio")}>
-            Portfolio Builder
-          </button>
-
-          <button className={`nav-button ${activeSection === "portfolio-audit" ? "active" : ""}`} onClick={() => jumpToSection("portfolio-audit")}>
-            Portfolio Audit
-          </button>
-
-          <button className={`nav-button ${activeSection === "application-readiness" ? "active" : ""}`} onClick={() => jumpToSection("application-readiness")}>
-            Application Readiness
-          </button>
-
-          <button className={`nav-button ${activeSection === "application-follow-up" ? "active" : ""}`} onClick={() => jumpToSection("application-follow-up")}>
-            Follow-up Copilot
-          </button>
-
-          <button className={`nav-button ${activeSection === "career-outcomes" ? "active" : ""}`} onClick={() => jumpToSection("career-outcomes")}>
-            Career Outcome Intelligence
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "nice"
-                ? "active"
-                : ""
-            }`}
-            onClick={() =>
-              jumpToSection("nice")
-            }
-          >
-            NICE Skill Map
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "career-intelligence"
-                ? "active"
-                : ""
-            }`}
-            onClick={() =>
-              jumpToSection("career-intelligence")
-            }
-          >
-            Career Intelligence
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "application-copilot"
-                ? "active"
-                : ""
-            }`}
-            onClick={() =>
-              jumpToSection("application-copilot")
-            }
-          >
-            Application Copilot
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "application-pipeline"
-                ? "active"
-                : ""
-            }`}
-            onClick={() => jumpToSection("application-pipeline")}
-          >
-            Application Pipeline
-          </button>
-
-          <button
-            className={`nav-button ${activeSection === "interview-intelligence" ? "active" : ""}`}
-            onClick={() => jumpToSection("interview-intelligence")}
-          >
-            Interview Intelligence
-          </button>
-
-          <button
-            className={`nav-button ${activeSection === "mock-interview" ? "active" : ""}`}
-            onClick={() => jumpToSection("mock-interview")}
-          >
-            Mock Interview
-          </button>
-
-          <button
-            className={`nav-button ${activeSection === "interview-history" ? "active" : ""}`}
-            onClick={() => jumpToSection("interview-history")}
-          >
-            Interview Analytics
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "application-tracker"
-                ? "active"
-                : ""
-            }`}
-            onClick={() =>
-              jumpToSection("application-tracker")
-            }
-          >
-            Deadline Tracker
-          </button>
-
-          <button
-            className={`nav-button ${
-              activeSection === "applications"
-                ? "active"
-                : ""
-            }`}
-            onClick={() =>
-              jumpToSection("applications")
-            }
-          >
-            Applications
-          </button>
+          <nav className="primary-nav cp-simple-nav" aria-label="Main navigation">
+            {navigationItems.map(item => (
+              <button key={item.id} type="button" aria-current={currentGroup === item.id ? "page" : undefined}
+                className={`nav-button primary-nav-button cp-nav-item ${currentGroup === item.id ? "active" : ""}`}
+                onClick={() => jumpToSection(item.id)}>
+                <span className="cp-nav-icon" aria-hidden="true">{item.icon}</span>
+                <span className="cp-nav-copy"><strong>{item.title}</strong><small>{item.detail}</small></span>
+              </button>
+            ))}
+          </nav>
+          <div className="sidebar-status">
+            <span className="status-dot" />
+            <span>CyberPath workspace</span>
+          </div>
         </aside>
 
         <div className="main">
-          <section className="hero">
-            <div>
-              <div className="eyebrow">
-                AI CYBERSECURITY CAREER AGENT
-              </div>
-
-              <h1>
-                Find the cybersecurity
-                <br />
-                jobs worth applying to.
-              </h1>
-
-              <p>
-                CyberPath AI analyzes your resume against
-                cybersecurity jobs, identifies skill gaps,
-                recommends what to learn, and tracks the
-                applications that matter.
-              </p>
+          {activeSection !== currentGroup && (
+            <div className="cp-back-bar">
+              <button className="button cp-return-button" type="button" onClick={() => jumpToSection(currentGroup)}>
+                ← Back to {navigationItems.find(item => item.id === currentGroup)?.title || "Overview"}
+              </button>
+              <span className="cp-detail-label">{getSectionLabel(activeSection)}</span>
             </div>
-
-            <div className="target-box">
-              <label>
-                Target Cybersecurity Role
-              </label>
-
-              <input
-                value={targetRole}
-                onChange={(event) =>
-                  setTargetRole(event.target.value)
-                }
-              />
-
-              <div
-                className="muted"
-                style={{ marginTop: 8 }}
-              >
-                Example: Cloud Security Engineer,
-                SOC Analyst, Cyber Threat Intelligence
-                Analyst
-              </div>
-            </div>
-          </section>
-
+          )}
           {error && (
             <div className="error">
               {error}
@@ -3600,177 +3812,171 @@ export default function Home() {
               STEP 31 — CAREER COMMAND CENTER
               ===================================================== */}
 
-          <section className="section" id="command-center">
-            <SectionHeader
-              eyebrow="02 / CAREER COMMAND CENTER"
-              title="Career Command Center"
-              description="A single operating view of your current cybersecurity job market, application progress, and highest-impact next move."
-            />
-
-            <div className="stats-grid">
-              <div className="stat-card">
-                <div className="stat-label">Jobs analyzed</div>
-                <div className="stat-value">{commandCenterStats.jobsAnalyzed}</div>
-                <div className="stat-sub">Current market snapshot</div>
+          <section className={`section ${activeSection === "command-center" ? "is-active" : "is-hidden"}`} id="command-center">
+            <div className="cp-welcome"><span className="cp-kicker">YOUR CAREER WORKSPACE</span><h1>Find your next cybersecurity role.</h1><p>Start with your resume. We’ll help you find relevant openings, prepare applications, and build your skills.</p></div>
+            <div className="cp-journey" aria-label="Your career journey">
+              <div><span>01</span><strong>Upload</strong><small>Add your resume</small></div>
+              <div><span>02</span><strong>Explore</strong><small>Find opportunities</small></div>
+              <div><span>03</span><strong>Apply</strong><small>Track progress</small></div>
+            </div>
+            <div className="step43-command-hero">
+              <div className="step43-orbit step43-orbit-one" />
+              <div className="step43-orbit step43-orbit-two" />
+              <div className="step43-hero-copy">
+                <div className="mini-label">YOUR FIRST STEP</div>
+                <h2>Upload your resume</h2>
+                <p>Add your PDF to get personalized job matches and resume feedback.</p>
+                <div className="cp-quick-upload">
+                  <button className="button primary" type="button" onClick={() => resumePickerRef.current?.click()} disabled={loading.upload}>{loading.upload ? "Analyzing resume…" : resumeText ? "Replace resume" : "Upload resume"}</button>
+                  <input ref={resumePickerRef} id="cp-quick-resume" className="cp-hidden-file-input" type="file" accept=".pdf,application/pdf" aria-label="Choose a PDF resume" disabled={loading.upload} onChange={event => { const file = event.target.files?.[0]; if (file) { setResumeFile(file); void uploadResume(file); } event.target.value = ""; }} />
+                  {resumeUploadStatus && <p className="cp-upload-success" role="status">{resumeUploadStatus}</p>}
+                </div>
+                <div className="step43-actions">
+                  <button className="button" onClick={() => jumpToSection("resume")}>Improve my resume ↓</button>
+                  <button className="button" onClick={() => jumpToSection("jobs")}>Browse jobs ↓</button>
+                </div>
               </div>
-              <div className="stat-card">
-                <div className="stat-label">High-fit jobs</div>
-                <div className="stat-value">{commandCenterStats.highFitJobs}</div>
-                <div className="stat-sub">Fit score ≥ 80</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">Applications</div>
-                <div className="stat-value">{commandCenterStats.applications}</div>
-                <div className="stat-sub">Saved + submitted</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">Interviews</div>
-                <div className="stat-value">{commandCenterStats.interviews}</div>
-                <div className="stat-sub">Tracked interview outcomes</div>
+              <div className="step43-shield cp-decorative-hidden" aria-hidden="true">
+                <div className="step43-shield-ring" />
+                <div className="step43-shield-core">CP</div>
+                <span className="step43-node n1">SKILL</span>
+                <span className="step43-node n2">JOB</span>
+                <span className="step43-node n3">PROOF</span>
               </div>
             </div>
 
-            <div className="stats-grid" style={{ marginTop: 14 }}>
-              <div className="stat-card">
-                <div className="stat-label">Average fit</div>
-                <div className="stat-value">{commandCenterStats.averageFit || "—"}</div>
-                <div className="stat-sub">Across analyzed jobs</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">Cybersecurity relevance</div>
-                <div className="stat-value">{commandCenterStats.averageCybersecurityRelevance || "—"}</div>
-                <div className="stat-sub">Average relevance score</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">Career value</div>
-                <div className="stat-value">{commandCenterStats.averageCareerValue || "—"}</div>
-                <div className="stat-sub">Long-term role value</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">Top repeated gap</div>
-                <div className="stat-value" style={{ fontSize: 22 }}>{biggestSkillGap?.skill || "—"}</div>
-                <div className="stat-sub">{biggestSkillGap ? `${biggestSkillGap.frequency} job matches` : "Analyze jobs first"}</div>
-              </div>
+            <div className="card cp-role-step">
+              <label htmlFor="cp-target-role">Step 2 · What role are you looking for?</label>
+              <p className="cp-input-hint">✎ Type the job title you want to find in the box below.</p>
+              <input className="cp-typing-field" aria-label="Enter a job title" id="cp-target-role" value={targetRole} onChange={event => setTargetRole(event.target.value)} placeholder="Type a job title (e.g. SOC Analyst)" />
+              <div className="cp-role-filters"><div><label htmlFor="cp-main-location">Location</label><input className="cp-typing-field" aria-label="Enter a city, state or remote" id="cp-main-location" value={jobLocation} onChange={event => setJobLocation(event.target.value)} placeholder="City, state, or Remote (optional)" /></div><div><label htmlFor="cp-main-type">Job type</label><select id="cp-main-type" value={employmentType} onChange={event => setEmploymentType(event.target.value)}><option value="all">All job types</option><option value="internship">Internship</option><option value="part_time">Part-time</option><option value="full_time">Full-time</option></select></div><div><label htmlFor="cp-main-company">Company</label><input className="cp-typing-field" aria-label="Enter a company name" id="cp-main-company" value={companyFilter} onChange={event => setCompanyFilter(event.target.value)} placeholder="Company name (optional)" /></div></div>
+              <button className="button primary" type="button" onClick={searchJobs} disabled={loading.searchJobs || !targetRole.trim() || (!resumeText.trim() && !profile.trim())}>{loading.searchJobs ? "Finding jobs…" : "Find matching jobs →"}</button>
             </div>
+            <div id="job-results" className="cp-inline-results" aria-live="polite">
+              <h2>{loading.searchJobs ? "Searching jobs…" : jobs.length ? `${jobs.length} matching jobs` : jobSearchNotice ? "No matching jobs found" : "Job results"}</h2>
+              {jobSearchNotice && <p className="cp-search-notice" role="status">{jobSearchNotice}</p>}
+              {loading.searchJobs ? <div className="cp-loading-line" aria-label="Searching" /> : null}
+            <div style={{ marginTop: 14 }}>
+              {jobs.length === 0 ? (
+                jobSearchNotice ? <div className="empty">No results for this search. Try a broader role or remove a filter.</div> : <div className="cp-results-placeholder">Search for a role to see matching jobs here.</div>
+              ) : (
+                <div className="job-list">
+                  {jobs.map((job, index) => (
+                    <div
+                      className="job-card"
+                      key={`${job.title}-${job.company}-${index}`}
+                    >
+                      <div className="job-top">
+                        <div>
+                          <div className="job-title">
+                            {job.title ||
+                              "Untitled Position"}
+                          </div>
 
-            <div className="card" style={{ marginTop: 14 }}>
-              <div className="mini-label">CAREER OPERATING STATUS</div>
-              <div className="dashboard-grid" style={{ marginTop: 12 }}>
-                <div>
-                  <div className="small-note">1 · PROFILE</div>
-                  <strong>{profile ? "Ready" : "Build profile"}</strong>
-                  <div className="button-row" style={{ marginTop: 8 }}>
-                    <button className="button" onClick={() => jumpToSection("resume")}>Resume</button>
-                  </div>
-                </div>
-                <div>
-                  <div className="small-note">2 · MARKET</div>
-                  <strong>{jobs.length ? `${jobs.length} jobs analyzed` : "Not analyzed"}</strong>
-                  <div className="button-row" style={{ marginTop: 8 }}>
-                    <button className="button" onClick={() => jumpToSection("jobs")}>Job Market</button>
-                  </div>
-                </div>
-                <div>
-                  <div className="small-note">3 · APPLICATIONS</div>
-                  <strong>{applications.length ? `${applications.length} tracked` : "No applications"}</strong>
-                  <div className="button-row" style={{ marginTop: 8 }}>
-                    <button className="button" onClick={() => jumpToSection("applications")}>Tracker</button>
-                  </div>
-                </div>
-                <div>
-                  <div className="small-note">4 · OUTCOMES</div>
-                  <strong>{Number(applicationAnalytics?.summary?.offer_count || 0) > 0 ? "Offer signal" : Number(applicationAnalytics?.summary?.interview_count || 0) > 0 ? "Interview signal" : "Build signal"}</strong>
-                  <div className="button-row" style={{ marginTop: 8 }}>
-                    <button className="button" onClick={() => jumpToSection("career-outcomes")}>Outcomes</button>
-                  </div>
-                </div>
-              </div>
-            </div>
+                          <div className="job-company">
+                            {job.company ||
+                              "Unknown Company"}{" "}
+                            ·{" "}
+                            {job.location ||
+                              "Location not specified"}
+                          </div>
 
-            <div className="dashboard-grid" style={{ marginTop: 14 }}>
-              <div className="card intelligence-card">
-                <div className="mini-label">RECOMMENDED CURRENT FOCUS</div>
-                <div className="big-highlight" style={{ marginTop: 10 }}>{commandCenterFocus.title}</div>
-                <p className="muted">{commandCenterFocus.detail}</p>
-                <div className="button-row">
-                  <button className="button primary" onClick={() => jumpToSection(commandCenterFocus.action)}>
-                    {commandCenterFocus.label}
-                  </button>
-                  <button className="button" onClick={() => { loadApplications(); loadDashboard(); loadApplicationAnalytics(); }}>
-                    Refresh Command Center
-                  </button>
-                </div>
-              </div>
+                          <div className="tags">
+                            <Tag
+                              type={
+                                Number(
+                                  job.cybersecurity_relevance ||
+                                    0
+                                ) >= 70
+                                  ? "green"
+                                  : ""
+                              }
+                            >
+                              Cybersecurity{" "}
+                              {job.cybersecurity_relevance ??
+                                0}
+                              %
+                            </Tag>
 
-              <div className="card intelligence-card">
-                <div className="mini-label">CAREER SEARCH SIGNAL</div>
-                <div className="analytics-mini-grid">
-                  <div><strong>{applicationAnalytics?.summary?.applied_count ?? 0}</strong><span>applied</span></div>
-                  <div><strong>{applicationAnalytics?.summary?.interview_count ?? 0}</strong><span>interviews</span></div>
-                  <div><strong>{applicationAnalytics?.summary?.offer_count ?? 0}</strong><span>offers</span></div>
-                  <div><strong>{applicationAnalytics?.summary?.awaiting_response ?? 0}</strong><span>awaiting</span></div>
-                </div>
-                <p className="muted" style={{ marginTop: 16 }}>
-                  {applicationAnalytics?.summary?.recommendation || "Keep analyzing and saving jobs to generate a stronger application signal."}
-                </p>
-              </div>
-            </div>
+                            <Tag>
+                              Priority{" "}
+                              {job.application_priority ||
+                                "Unknown"}
+                            </Tag>
+                          </div>
+                        </div>
 
-            <div className="card" style={{ marginTop: 14 }}>
-              <div className="mini-label">TOP CURRENT OPPORTUNITIES</div>
-              {commandCenterOpportunities.length ? (
-                <div className="analytics-list">
-                  {commandCenterOpportunities.map((job, index) => (
-                    <div className="analytics-list-row" key={`${job.id || job.title}-${index}`}>
-                      <div>
-                        <strong>{job.title || "Untitled Position"}</strong>
-                        <small>{job.company || "Unknown Company"} · {job.location || "Location not specified"}</small>
+                        <div
+                          className={scoreClass(
+                            job.fit_score
+                          )}
+                        >
+                          {job.fit_score ?? 0}
+                        </div>
                       </div>
-                      <div className="tags" style={{ justifyContent: "flex-end" }}>
-                        <Tag type={Number(job.fit_score || 0) >= 80 ? "green" : ""}>Fit {job.fit_score ?? 0}</Tag>
-                        <Tag>Cyber {job.cybersecurity_relevance ?? 0}</Tag>
-                        <Tag>Career {job.career_value ?? 0}</Tag>
-                        <button className="button" onClick={() => selectJob(job)}>Review</button>
+
+                      <p className="muted">{job.summary || "Select View description to read the posting."}</p>
+                      <div className="job-posting-meta">
+                        <span><strong>Posted:</strong> {job.created ? new Date(job.created).toLocaleDateString() : "Not provided"}</span>
+                        <span><strong>Apply by:</strong> {job.application_deadline || "Not provided by job source — check employer listing"}</span>
+                      </div>
+                      <button type="button" className="button" aria-expanded={expandedJobIds.includes(String(job.id ?? index))} onClick={() => setExpandedJobIds(ids => ids.includes(String(job.id ?? index)) ? ids.filter(id => id !== String(job.id ?? index)) : [...ids, String(job.id ?? index)])}>
+                        {expandedJobIds.includes(String(job.id ?? index)) ? "Hide description −" : "View description +"}
+                      </button>
+                      {expandedJobIds.includes(String(job.id ?? index)) && <div className="job-description-panel"><h4>Job description</h4><p>{job.description || "This job source did not provide a description. Open the original posting for details."}</p></div>}
+
+                      <div className="button-row">
+                        <button
+                          className="button primary"
+                          onClick={() =>
+                            selectJob(job)
+                          }
+                        >
+                          Check my fit →
+                        </button>
+
+                        <button
+                          className="button"
+                          onClick={() =>
+                            saveJob(job)
+                          }
+                          disabled={
+                            loading[
+                              `save-${job.id || job.title}`
+                            ]
+                          }
+                        >
+                          {loading[`save-${job.id || job.title}`] ? "Updating..." : isJobSaved(job) ? "✓ Saved" : "Save Application"}
+                        </button>
+
+                        {job.url && (
+                          <a
+                            className="button"
+                            href={job.url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Apply / View posting ↗
+                          </a>
+                        )}
+                        {!job.url && <span className="cp-unavailable-link">Application link unavailable from source</span>}
                       </div>
                     </div>
                   ))}
                 </div>
-              ) : (
-                <div className="empty-small">No analyzed opportunities yet. Run Job Market Analysis first.</div>
               )}
             </div>
-
-            <div className="dashboard-grid" style={{ marginTop: 14 }}>
-              <div className="card">
-                <div className="mini-label">REPEATED SKILL GAPS</div>
-                {allMissingSkills.length ? (
-                  allMissingSkills.slice(0, 6).map(([skill, count], index) => (
-                    <div className="analytics-list-row" key={`${skill}-${index}`}>
-                      <div><strong>{skill}</strong><small>Appears in {count} analyzed job{count === 1 ? "" : "s"}</small></div>
-                      <Tag type={index === 0 ? "red" : ""}>{index === 0 ? "Top Gap" : `#${index + 1}`}</Tag>
-                    </div>
-                  ))
-                ) : (
-                  <div className="empty-small">No repeated skill gaps yet.</div>
-                )}
-              </div>
-
-              <div className="card">
-                <div className="mini-label">NEXT BEST ACTIONS</div>
-                <div className="roadmap-list">
-                  <div className="roadmap-item"><div className="roadmap-number">1</div><div><strong>{biggestSkillGap?.skill ? `Learn ${biggestSkillGap.skill}` : "Analyze your job market"}</strong><span className="muted">{biggestSkillGap?.skill ? "Attack the most repeated requirement first." : "Get current job data before choosing what to learn."}</span></div></div>
-                  <div className="roadmap-item"><div className="roadmap-number">2</div><div><strong>Prioritize high-fit cybersecurity roles</strong><span className="muted">Use Fit + Cybersecurity Relevance + Career Value together.</span></div></div>
-                  <div className="roadmap-item"><div className="roadmap-number">3</div><div><strong>Turn preparation into applications</strong><span className="muted">Use the Application Pipeline for the strongest opportunities.</span></div></div>
-                </div>
-              </div>
             </div>
+
+
+
           </section>
 
           {/* =====================================================
               STEP 29 — APPLICATION ANALYTICS
               ===================================================== */}
 
-          <section className="section" id="application-analytics">
+          <section className={`section ${activeSection === "application-analytics" ? "is-active" : "is-hidden"}`} id="application-analytics">
             <SectionHeader
               eyebrow="03 / APPLICATION ANALYTICS"
               title="Application Performance"
@@ -3850,9 +4056,7 @@ export default function Home() {
               STEP 18 — DASHBOARD INTELLIGENCE
               ===================================================== */}
 
-          <section
-            className="section"
-            id="dashboard"
+          <section className={`section ${activeSection === "dashboard" ? "is-active" : "is-hidden"}`} id="dashboard"
           >
             <SectionHeader
               eyebrow="01 / DASHBOARD INTELLIGENCE"
@@ -4526,7 +4730,7 @@ export default function Home() {
                             target="_blank"
                             rel="noreferrer"
                           >
-                            Open Job
+                            Apply / view original ↗
                           </a>
                         )}
                       </div>
@@ -4559,7 +4763,7 @@ export default function Home() {
                         <div className="job-top">
                           <div>
                             <div className="job-title">
-                              {application.job_title}
+                              {application.url ? <a href={application.url} target="_blank" rel="noopener noreferrer" className="cp-apply-link">{application.job_title} ↗</a> : application.job_title}
                             </div>
 
                             <div className="job-company">
@@ -4604,9 +4808,9 @@ export default function Home() {
             </div>
           </section>
 
-          <div className="card career-intel-dashboard-card" style={{ marginTop: 14 }}>
+          <div className="card career-intel-dashboard-card" style={{ display:"none", marginTop: 14 }}>
             <div>
-              <div className="mini-label">STEP 20 / CAREER INTELLIGENCE</div>
+              <div className="mini-label">CAREER INSIGHTS</div>
               <div className="big-highlight">What should I do next?</div>
               <p className="muted">
                 Combine your resume, analyzed jobs, NICE mapping, learning plan,
@@ -4654,307 +4858,90 @@ export default function Home() {
             </div>
           </div>
 
+          <div className="card adaptive-engine-card" style={{ display:"none", marginTop: 14 }}>
+            <div className="adaptive-engine-head">
+              <div>
+                <div className="mini-label">APPLICATION INSIGHTS</div>
+                <div className="big-highlight">The system gets smarter from your career signals.</div>
+                <p className="muted">
+                  Jobs create skill gaps → learning creates proof → application outcomes update future priorities.
+                </p>
+              </div>
+              <button className="button primary" onClick={refreshAdaptiveIntelligence}>
+                Refresh Engine
+              </button>
+            </div>
+            <div className="adaptive-pipeline">
+              <span>Jobs</span><b>→</b><span>Skill Graph</span><b>→</b><span>Learning</span><b>→</b><span>Applications</span><b>→</b><span>Outcomes</span><b>→</b><span>Better Weights</span>
+            </div>
+            {adaptiveOutcomes ? (
+              <div className="adaptive-grid">
+                <div className="adaptive-stat"><span>Applied</span><strong>{adaptiveOutcomes.funnel?.Applied ?? 0}</strong></div>
+                <div className="adaptive-stat"><span>Interviews</span><strong>{adaptiveOutcomes.funnel?.Interview ?? 0}</strong></div>
+                <div className="adaptive-stat"><span>Offers</span><strong>{adaptiveOutcomes.funnel?.Offer ?? 0}</strong></div>
+                <div className="adaptive-stat"><span>App → Interview</span><strong>{adaptiveOutcomes.funnel?.application_to_interview_rate ?? 0}%</strong></div>
+              </div>
+            ) : (
+              <div className="empty-small">Refresh to load adaptive outcome statistics.</div>
+            )}
+          </div>
+
+          <section className={`section ${activeSection === "job-prep" ? "is-active" : "is-hidden"}`} id="job-prep">
+            <div className="cp-prep-head"><span className="mini-label">JOB PREPARATION</span><h1>Prepare for your next interview</h1><p>Improve your real resume for a selected job, then practice ten questions with AI feedback.</p></div>
+            {!selectedJob ? <div className="card cp-prep-empty"><h2>Choose a job to get started</h2><p>Find a job and select <strong>Check my fit</strong>. We will use that posting and your resume to personalize your preparation.</p><button className="button primary" onClick={() => jumpToSection("jobs")}>Find a job →</button></div> : <>
+              <div className="card cp-prep-target"><div><span className="mini-label">PREPARING FOR</span><h2>{selectedJob.title}</h2><p>{selectedJob.company} · {selectedJob.location}</p></div>{selectedJob.url && <a className="button" href={selectedJob.url} target="_blank" rel="noopener noreferrer">View job posting ↗</a>}</div>
+              <div className="cp-prep-tabs" role="tablist" aria-label="Preparation tools"><button type="button" role="tab" aria-selected={jobPrepTab === "resume"} className={jobPrepTab === "resume" ? "active" : ""} onClick={() => setJobPrepTab("resume")}>✎ Improve my resume</button><button type="button" role="tab" aria-selected={jobPrepTab === "interview"} className={jobPrepTab === "interview" ? "active" : ""} onClick={() => setJobPrepTab("interview")}>◉ Practice 10 questions</button></div>
+              {jobPrepTab === "resume" ? (
+                <div className="card cp-prep-panel">
+                  <h2>Resume PDF · tailored to {selectedJob?.title || "your chosen job"}</h2>
+                  <p>Yellow highlights mark changed or newly prioritized wording. Comment boxes explain why each change supports the selected role. Verify every claim before applying.</p>
+                  <LoadingButton loading={loading.tailorResume} disabled={!resumeText.trim() || !selectedJob} onClick={tailorResume}>Create annotated PDF</LoadingButton>
+                  {!selectedJob && <p className="muted">Choose a job from the search results first.</p>}
+                  {tailoredPdfUrl && <div className="cp-pdf-preview"><iframe title="Annotated tailored resume PDF" src={tailoredPdfUrl} /><a className="button primary" href={tailoredPdfUrl} download="cyberpath-tailored-resume-review.pdf">Download annotated PDF ↓</a></div>}
+                </div>
+              ) : (
+                <div className="card cp-prep-panel">
+                  <h2>10 interview questions</h2>
+                  <p>5 questions about the selected job and 5 based on your resume. Answer each one, then flip the feedback card to see a stronger example.</p>
+                  {!mockInterview ? <LoadingButton loading={loading.mockInterview} onClick={startMockInterview}>Generate 10 questions</LoadingButton> : mockCompleted ? (
+                    <div className="cp-prep-output"><h3>Practice complete</h3><p>Answered {mockScores.length} questions · Average {mockScores.length ? (mockScores.reduce((a,b)=>a+b,0)/mockScores.length).toFixed(1) : "0"}/5</p><button className="button" onClick={startMockInterview}>Practice again</button></div>
+                  ) : (
+                    <div className="cp-prep-output">
+                      <div className="cp-question-progress">{mockIndex < 5 ? "Job-specific" : "Resume-specific"} · Question {mockIndex+1} / 10</div>
+                      <h3>{mockInterview.questions?.[mockIndex]?.question}</h3>
+                      <label htmlFor="cp-practice-answer">Your answer</label>
+                      <textarea id="cp-practice-answer" className="textarea" rows={6} placeholder="Write how you would answer in an interview…" value={mockAnswer} onChange={event => { const value = event.target.value; setMockAnswer(value); setMockAnswers(previous => ({...previous, [mockIndex]: value})); if (mockEvaluation) { setMockEvaluation(null); setMockEvaluations(previous => { const updated = {...previous}; delete updated[mockIndex]; return updated; }); } }} />
+                      <div className="button-row"><button type="button" className="button" disabled={mockIndex === 0} onClick={previousMockQuestion}>← Previous question</button><LoadingButton loading={loading.mockEvaluate} disabled={!mockAnswer.trim()} onClick={evaluateMockAnswer}>Get score & feedback</LoadingButton></div>
+                      {mockEvaluation && <>
+                        <button type="button" className={`cp-flip-card ${feedbackFlipped ? "is-flipped" : ""}`} onClick={() => setFeedbackFlipped(value=>!value)} aria-label={feedbackFlipped ? "Show feedback" : "Show stronger example answer"}>
+                          {!feedbackFlipped ? <span className="cp-flip-face"><strong>Feedback · {mockEvaluation.scores?.overall ?? 0}/5</strong><span>{mockEvaluation.verdict || "Answer reviewed"}</span><span>{safeArray(mockEvaluation.issues_to_fix).slice(0,2).join(" · ") || mockEvaluation.coach_note || "Tap to see a stronger answer."}</span><em>Tap to flip → Example answer</em></span> : <span className="cp-flip-face"><strong>Suggested answer approach</strong><span>{mockEvaluation.stronger_answer_direction || mockEvaluation.coach_note || "Explain your approach, evidence and outcome. Never claim experience you do not have."}</span><em>↶ Tap to return to feedback</em></span>}
+                        </button>
+                        <div className="button-row"><button type="button" className="button" disabled={mockIndex === 0} onClick={previousMockQuestion}>← Previous question</button><button type="button" className="button primary" onClick={nextMockQuestion}>{mockIndex === 9 ? "Finish practice" : "Next question →"}</button></div>
+                      </>}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>}
+          </section>
+
           {/* =====================================================
               RESUME
               ===================================================== */}
 
-          <section
-            className="section"
-            id="resume"
-          >
-            <SectionHeader
-              eyebrow="02 / RESUME"
-              title="Resume Intelligence"
-              description="Upload your resume and turn it into a cybersecurity career profile."
-            />
 
-            <div className="card">
-              <div className="upload-box">
-                <div className="eyebrow">
-                  PDF RESUME
-                </div>
-
-                <h3>
-                  {resumeFile
-                    ? resumeFile.name
-                    : "Upload your resume"}
-                </h3>
-
-                <div className="muted">
-                  PDF files are parsed by the FastAPI
-                  backend.
-                </div>
-
-                <input
-                  type="file"
-                  accept=".pdf"
-                  onChange={(
-                    event: ChangeEvent<HTMLInputElement>
-                  ) => {
-                    const file =
-                      event.target.files?.[0] ||
-                      null;
-
-                    setResumeFile(file);
-                  }}
-                />
-
-                <div className="button-row">
-                  <LoadingButton
-                    loading={loading.upload}
-                    onClick={uploadResume}
-                  >
-                    Upload Resume
-                  </LoadingButton>
-
-                  <LoadingButton
-                    loading={loading.analyzeResume}
-                    onClick={analyzeResume}
-                    disabled={!resumeText}
-                  >
-                    Analyze Resume
-                  </LoadingButton>
-                </div>
-              </div>
-            </div>
-
-            {profile && (
-              <div
-                className="card"
-                style={{ marginTop: 14 }}
-              >
-                <div className="mini-label">
-                  Cybersecurity Profile
-                </div>
-
-                <div
-                  className="profile-box"
-                  style={{ marginTop: 10 }}
-                >
-                  {profile}
-                </div>
-
-                <div className="button-row">
-                  <LoadingButton
-                    loading={loading.learning}
-                    onClick={
-                      getLearningRecommendations
-                    }
-                  >
-                    Build Learning Plan
-                  </LoadingButton>
-
-                  <LoadingButton
-                    loading={loading.roadmap}
-                    onClick={generateCareerRoadmap}
-                  >
-                    Build Career Roadmap
-                  </LoadingButton>
-
-                  <LoadingButton
-                    loading={loading.careerAdvice}
-                    onClick={getCareerAdvice}
-                  >
-                    Get Career Advice
-                  </LoadingButton>
-                </div>
-              </div>
-            )}
-          </section>
 
           {/* =====================================================
               JOB INTELLIGENCE
               ===================================================== */}
 
-          <section
-            className="section"
-            id="jobs"
-          >
-            <SectionHeader
-              eyebrow="03 / JOB MARKET"
-              title="Cybersecurity Job Intelligence"
-              description="Search multiple cybersecurity job variations and rank them by career fit."
-            />
 
-            <div className="card">
-              <div className="form-grid">
-                <div>
-                  <label>Search Location</label>
-                  <input
-                    value={jobLocation}
-                    onChange={(event) => setJobLocation(event.target.value)}
-                    placeholder="e.g. Remote, Wilmington, NC, Raleigh, NC"
-                  />
-                </div>
-
-                <div>
-                  <label>Minimum Fit Score</label>
-                  <select
-                    value={minFitScore}
-                    onChange={(event) => setMinFitScore(Number(event.target.value))}
-                  >
-                    <option value={0}>Any</option>
-                    <option value={50}>50+</option>
-                    <option value={60}>60+</option>
-                    <option value={70}>70+</option>
-                    <option value={80}>80+</option>
-                    <option value={90}>90+</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label>Minimum Cybersecurity Relevance</label>
-                  <select
-                    value={minCybersecurityRelevance}
-                    onChange={(event) => setMinCybersecurityRelevance(Number(event.target.value))}
-                  >
-                    <option value={0}>Any</option>
-                    <option value={40}>40+</option>
-                    <option value={50}>50+</option>
-                    <option value={60}>60+</option>
-                    <option value={70}>70+</option>
-                    <option value={80}>80+</option>
-                    <option value={90}>90+</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="button-row" style={{ marginTop: 16 }}>
-                <LoadingButton
-                  loading={loading.searchJobs}
-                  onClick={searchJobs}
-                >
-                  Analyze My Job Market
-                </LoadingButton>
-              </div>
-
-              <div className="muted" style={{ marginTop: 10 }}>
-                Searches up to 20 jobs, prioritizes cybersecurity-focused postings, and filters results using your minimum Fit and Cybersecurity Relevance scores.
-              </div>
-            </div>
-
-            <div style={{ marginTop: 14 }}>
-              {jobs.length === 0 ? (
-                <div className="empty">
-                  No jobs analyzed yet.
-                  <br />
-                  Upload your resume, analyze your
-                  profile, then search for jobs.
-                </div>
-              ) : (
-                <div className="job-list">
-                  {jobs.map((job, index) => (
-                    <div
-                      className="job-card"
-                      key={`${job.title}-${job.company}-${index}`}
-                    >
-                      <div className="job-top">
-                        <div>
-                          <div className="job-title">
-                            {job.title ||
-                              "Untitled Position"}
-                          </div>
-
-                          <div className="job-company">
-                            {job.company ||
-                              "Unknown Company"}{" "}
-                            ·{" "}
-                            {job.location ||
-                              "Location not specified"}
-                          </div>
-
-                          <div className="tags">
-                            <Tag
-                              type={
-                                Number(
-                                  job.cybersecurity_relevance ||
-                                    0
-                                ) >= 70
-                                  ? "green"
-                                  : ""
-                              }
-                            >
-                              Cybersecurity{" "}
-                              {job.cybersecurity_relevance ??
-                                0}
-                              %
-                            </Tag>
-
-                            <Tag>
-                              Priority{" "}
-                              {job.application_priority ||
-                                "Unknown"}
-                            </Tag>
-                          </div>
-                        </div>
-
-                        <div
-                          className={scoreClass(
-                            job.fit_score
-                          )}
-                        >
-                          {job.fit_score ?? 0}
-                        </div>
-                      </div>
-
-                      <p className="muted">
-                        {job.summary ||
-                          "No AI summary available."}
-                      </p>
-
-                      <div className="button-row">
-                        <button
-                          className="button primary"
-                          onClick={() =>
-                            selectJob(job)
-                          }
-                        >
-                          View Intelligence
-                        </button>
-
-                        <button
-                          className="button"
-                          onClick={() =>
-                            saveJob(job)
-                          }
-                          disabled={
-                            loading[
-                              `save-${job.id || job.title}`
-                            ]
-                          }
-                        >
-                          {loading[
-                            `save-${job.id || job.title}`
-                          ]
-                            ? "Saving..."
-                            : "Save Application"}
-                        </button>
-
-                        {job.url && (
-                          <a
-                            className="button"
-                            href={job.url}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Open Job
-                          </a>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </section>
 
           {/* =====================================================
               SELECTED JOB
               ===================================================== */}
 
-          <section
-            className="section"
-            id="job-detail"
+          <section className={`section ${activeSection === "job-detail" ? "is-active" : "is-hidden"}`} id="job-detail"
           >
             <SectionHeader
               eyebrow="04 / DEEP ANALYSIS"
@@ -5022,7 +5009,7 @@ export default function Home() {
                         saveJob(selectedJob)
                       }
                     >
-                      Save Application
+                      {isJobSaved(selectedJob) ? "✓ Saved" : "Save Application"}
                     </button>
                   </div>
                 </div>
@@ -5152,7 +5139,7 @@ export default function Home() {
           {/* =====================================================
               STEP 32 — PERSONALIZED 90-DAY CAREER PLAN
               ===================================================== */}
-          <section className="section" id="90-day-plan">
+          <section className={`section ${activeSection === "90-day-plan" ? "is-active" : "is-hidden"}`} id="90-day-plan">
             <SectionHeader
               eyebrow="08 / 90-DAY CAREER PLAN"
               title="Your Next 90 Days"
@@ -5234,8 +5221,8 @@ export default function Home() {
                     {[["DAYS 1–30", personalized90DayPlan.days_1_30], ["DAYS 31–60", personalized90DayPlan.days_31_60], ["DAYS 61–90", personalized90DayPlan.days_61_90]].map(([label, phase]: any) => (
                       <div className="card" key={label} style={{ margin: 0 }}>
                         <div className="mini-label">{label}</div><div className="big-highlight">{phase?.theme || "Execution phase"}</div>
-                        <ul className="list">{safeArray(phase?.goals).map((goal, index) => <li key={`${goal}-${index}`}>{goal}</li>)}</ul>
-                        {safeArray(phase?.weekly_actions).map((week, index) => <div key={`${week.week}-${index}`} style={{ marginTop: 12 }}><div className="mini-label">WEEK {week.week ?? index + 1}</div><ul className="list">{safeArray(week.actions).map((action, actionIndex) => <li key={`${action}-${actionIndex}`}>{action}</li>)}</ul></div>)}
+                        <ul className="list">{safeArray<string>(phase?.goals as string[] | undefined).map((goal, index) => <li key={`${goal}-${index}`}>{goal}</li>)}</ul>
+                        {safeArray(phase?.weekly_actions as { week?: number; actions?: string[] }[] | undefined).map((week, index) => <div key={`${week.week}-${index}`} style={{ marginTop: 12 }}><div className="mini-label">WEEK {week.week ?? index + 1}</div><ul className="list">{safeArray<string>(week.actions as string[] | undefined).map((action, actionIndex) => <li key={`${action}-${actionIndex}`}>{action}</li>)}</ul></div>)}
                       </div>
                     ))}
                   </div>
@@ -5259,7 +5246,7 @@ export default function Home() {
           {/* =====================================================
               STEP 33 — AI CAREER SPRINT
               ===================================================== */}
-          <section className="section" id="career-sprint">
+          <section className={`section ${activeSection === "career-sprint" ? "is-active" : "is-hidden"}`} id="career-sprint">
             <SectionHeader
               eyebrow="09 / AI CAREER SPRINT"
               title="Turn the 90-Day Plan Into This Week"
@@ -5352,7 +5339,7 @@ export default function Home() {
           {/* =====================================================
               STEP 34 — CAREER EVIDENCE TRACKER
               ===================================================== */}
-          <section className="section" id="career-evidence">
+          <section className={`section ${activeSection === "career-evidence" ? "is-active" : "is-hidden"}`} id="career-evidence">
             <SectionHeader eyebrow="10 / CAREER EVIDENCE" title="Prove You Are Ready" description="Audit the evidence behind your cybersecurity skills, identify what is still unproven, and build the next proof before you apply." />
             <div className="card">
               <div className="two-column">
@@ -5384,7 +5371,7 @@ export default function Home() {
           {/* =====================================================
               STEP 35 — CYBERSECURITY PORTFOLIO BUILDER
               ===================================================== */}
-          <section className="section" id="cybersecurity-portfolio">
+          <section className={`section ${activeSection === "cybersecurity-portfolio" ? "is-active" : "is-hidden"}`} id="cybersecurity-portfolio">
             <SectionHeader eyebrow="11 / PORTFOLIO BUILDER" title="Build Proof, Not Just Skills" description="Turn your real skill gaps and evidence into cybersecurity projects that are useful for GitHub, your resume, and interviews." />
             <div className="card">
               <div className="two-column">
@@ -5416,7 +5403,7 @@ export default function Home() {
           {/* =====================================================
               STEP 36 — PORTFOLIO QUALITY AUDIT
               ===================================================== */}
-          <section className="section" id="portfolio-audit">
+          <section className={`section ${activeSection === "portfolio-audit" ? "is-active" : "is-hidden"}`} id="portfolio-audit">
             <SectionHeader eyebrow="12 / PORTFOLIO AUDIT" title="Would a Cybersecurity Recruiter Believe This?" description="Audit your portfolio against real job-market requirements and identify the proof that needs to be stronger before you apply." />
             <div className="card">
               <div className="two-column">
@@ -5448,7 +5435,7 @@ export default function Home() {
           {/* =====================================================
               STEP 37 — APPLICATION READINESS GATE
               ===================================================== */}
-          <section className="section" id="application-readiness">
+          <section className={`section ${activeSection === "application-readiness" ? "is-active" : "is-hidden"}`} id="application-readiness">
             <SectionHeader eyebrow="13 / APPLICATION READINESS" title="Should You Apply Right Now?" description="Run one final cybersecurity-specific readiness check before spending time on an application. The gate separates real blockers from trainable gaps." />
             <div className="card">
               <div className="two-column">
@@ -5492,7 +5479,7 @@ export default function Home() {
           {/* =====================================================
               STEP 38 — APPLICATION FOLLOW-UP COPILOT
               ===================================================== */}
-          <section className="section" id="application-follow-up">
+          <section className={`section ${activeSection === "application-follow-up" ? "is-active" : "is-hidden"}`} id="application-follow-up">
             <SectionHeader eyebrow="14 / APPLICATION FOLLOW-UP" title="Turn Applications Into Conversations" description="Generate realistic recruiter outreach, follow-up timing, networking approaches, and interview thank-you messages without inventing contacts or experience." />
             <div className="card">
               <div className="two-column">
@@ -5541,7 +5528,7 @@ export default function Home() {
           {/* =====================================================
               STEP 39 — CAREER OUTCOME INTELLIGENCE
               ===================================================== */}
-          <section className="section" id="career-outcomes">
+          <section className={`section ${activeSection === "career-outcomes" ? "is-active" : "is-hidden"}`} id="career-outcomes">
             <SectionHeader eyebrow="15 / CAREER OUTCOME INTELLIGENCE" title="Learn From Your Actual Application Results" description="Turn application, interview, and job-market outcomes into evidence-based changes to your cybersecurity job-search strategy." />
             <div className="card">
               <div className="career-intel-hero">
@@ -5593,9 +5580,7 @@ export default function Home() {
               STEP 19 — NICE CYBERSECURITY SKILL MAPPING
               ===================================================== */}
 
-          <section
-            className="section"
-            id="nice"
+          <section className={`section ${activeSection === "nice" ? "is-active" : "is-hidden"}`} id="nice"
           >
             <SectionHeader
               eyebrow="05 / NICE SKILL MAPPING"
@@ -6045,7 +6030,7 @@ export default function Home() {
               STEP 21 — APPLICATION COPILOT
               ===================================================== */}
 
-          <section className="section" id="application-copilot">
+          <section className={`section ${activeSection === "application-copilot" ? "is-active" : "is-hidden"}`} id="application-copilot">
             <SectionHeader
               eyebrow="07 / APPLICATION COPILOT"
               title="Turn a Job Into an Application Plan"
@@ -6207,7 +6192,7 @@ export default function Home() {
               STEP 27 — APPLICATION PIPELINE
               ===================================================== */}
 
-          <section className="section" id="application-pipeline">
+          <section className={`section ${activeSection === "application-pipeline" ? "is-active" : "is-hidden"}`} id="application-pipeline">
             <SectionHeader
               eyebrow="08 / APPLICATION PIPELINE"
               title="One Job → One Complete Application"
@@ -6381,9 +6366,7 @@ export default function Home() {
               STEP 20 — CAREER INTELLIGENCE
               ===================================================== */}
 
-          <section
-            className="section"
-            id="career-intelligence"
+          <section className={`section ${activeSection === "career-intelligence" ? "is-active" : "is-hidden"}`} id="career-intelligence"
           >
             <SectionHeader
               eyebrow="06 / CAREER INTELLIGENCE"
@@ -6572,7 +6555,7 @@ export default function Home() {
                             <div>
                               <strong>{week.goal || "Weekly goal"}</strong>
                               <ul className="list">
-                                {safeArray(week.actions).map((action, actionIndex) => (
+                                {safeArray<string>(week.actions as string[] | undefined).map((action, actionIndex) => (
                                   <li key={`${action}-${actionIndex}`}>{action}</li>
                                 ))}
                               </ul>
@@ -6609,10 +6592,9 @@ export default function Home() {
             </div>
           </section>
 
-          <section
-            className="section"
-            id="learning"
+          <section className={`section ${activeSection === "learning" ? "is-active" : "is-hidden"}`} id="learning"
           >
+            <div className="engine-badge">LOCAL LEARNING INTELLIGENCE · GAP → RESOURCE → PROOF</div>
             <SectionHeader
               eyebrow="06 / SKILL DEVELOPMENT"
               title="Learning Intelligence"
@@ -6886,9 +6868,7 @@ export default function Home() {
               ROADMAP
               ===================================================== */}
 
-          <section
-            className="section"
-            id="roadmap"
+          <section className={`section ${activeSection === "roadmap" ? "is-active" : "is-hidden"}`} id="roadmap"
           >
             <SectionHeader
               eyebrow="07 / CAREER STRATEGY"
@@ -7082,9 +7062,7 @@ export default function Home() {
               RESUME TAILORING
               ===================================================== */}
 
-          <section
-            className="section"
-            id="resume-tailor"
+          <section className={`section ${activeSection === "resume-tailor" ? "is-active" : "is-hidden"}`} id="resume-tailor"
           >
             <SectionHeader
               eyebrow="08 / APPLICATION PREPARATION"
@@ -7135,7 +7113,7 @@ export default function Home() {
               STEP 22 — INTERVIEW INTELLIGENCE
               ===================================================== */}
 
-          <section className="section" id="interview-intelligence">
+          <section className={`section ${activeSection === "interview-intelligence" ? "is-active" : "is-hidden"}`} id="interview-intelligence">
             <SectionHeader eyebrow="08 / INTERVIEW INTELLIGENCE" title="Prepare for the Interview, Not Just the Application" description="Generate job-specific technical, cybersecurity, resume-based, and behavioral preparation using only evidence from your real profile." />
             <div className="card">
               {!selectedJob ? (
@@ -7171,63 +7149,7 @@ export default function Home() {
           {/* =====================================================
               STEP 23 — MOCK INTERVIEW
               ===================================================== */}
-          <section className="section" id="mock-interview">
-            <SectionHeader eyebrow="09 / MOCK INTERVIEW" title="Practice the Interview, Then Fix the Weakness" description="Answer realistic cybersecurity interview questions and get AI feedback on technical accuracy, security reasoning, communication, and answer structure." />
-            <div className="card">
-              {!mockInterview ? (
-                <div className="mock-empty">
-                  <div>
-                    <div className="mini-label">AI INTERVIEWER</div>
-                    <div className="big-highlight">5 questions · real job · instant coaching</div>
-                    <p className="muted">The interviewer will use the selected job, your resume profile, and the Step 22 interview plan. Start when you are ready to answer out loud or type your response.</p>
-                  </div>
-                  <LoadingButton loading={loading.mockInterview} onClick={startMockInterview}>Start Mock Interview</LoadingButton>
-                </div>
-              ) : mockCompleted ? (
-                <div className="mock-complete">
-                  <div className="mini-label">INTERVIEW COMPLETE</div>
-                  <h2>Mock interview finished.</h2>
-                  <p className="muted">You completed {mockScores.length} of {mockInterview.questions?.length || 0} questions.</p>
-                  <div className="mock-final-score"><span>AVERAGE SCORE</span><strong>{mockScores.length ? Math.round(mockScores.reduce((a,b)=>a+b,0) / mockScores.length) : 0}</strong><small>/ 5</small></div>
-                  <div className="button-row"><button className="button" onClick={startMockInterview}>Run Again</button><button className="button secondary" onClick={() => jumpToSection("interview-intelligence")}>Review Interview Plan</button></div>
-                </div>
-              ) : (
-                <>
-                  <div className="mock-topbar">
-                    <div><div className="mini-label">{mockInterview.session_title || "MOCK INTERVIEW"}</div><strong>Question {mockIndex + 1} / {mockInterview.questions?.length || 0}</strong></div>
-                    <div className="mock-progress"><div style={{width:`${((mockIndex + 1) / Math.max(mockInterview.questions?.length || 1,1)) * 100}%`}} /></div>
-                    <button className="button secondary" onClick={startMockInterview}>Restart</button>
-                  </div>
-                  {mockInterview.instructions && <p className="mock-instructions">{mockInterview.instructions}</p>}
-                  <div className="mock-question-card">
-                    <div className="mock-question-meta"><Tag type="blue">{mockInterview.questions?.[mockIndex]?.category || "Technical"}</Tag><Tag>{mockInterview.questions?.[mockIndex]?.difficulty || "Medium"}</Tag></div>
-                    <h2>{mockInterview.questions?.[mockIndex]?.question || "Question"}</h2>
-                    <p className="muted">Tests: {mockInterview.questions?.[mockIndex]?.what_it_tests || "—"}</p>
-                  </div>
-                  <div className="mock-answer-area">
-                    <div className="mini-label">YOUR ANSWER</div>
-                    <textarea className="textarea mock-textarea" value={mockAnswer} onChange={(e)=>setMockAnswer(e.target.value)} placeholder="Answer as if you were in the actual interview. Explain your reasoning and use your real experience when relevant." />
-                    <div className="mock-actions"><span className="muted">Tip: do not invent experience. If you have not done something, explain how you would approach it.</span><LoadingButton loading={loading.mockEvaluate} onClick={evaluateMockAnswer}>{mockEvaluation ? "Re-evaluate Answer" : "Submit Answer"}</LoadingButton></div>
-                  </div>
-                  {mockEvaluation && <div className="mock-feedback">
-                    <div className="mock-feedback-header"><div><div className="mini-label">AI COACH</div><h3>{mockEvaluation.verdict || "Feedback"}</h3></div><div className="mock-answer-score"><strong>{mockEvaluation.scores?.overall ?? 0}</strong><span>/ 5</span></div></div>
-                    <div className="mock-score-grid"><div><span>Technical</span><strong>{mockEvaluation.scores?.technical_accuracy ?? 0}/5</strong></div><div><span>Cybersecurity</span><strong>{mockEvaluation.scores?.cybersecurity_reasoning ?? 0}/5</strong></div><div><span>Communication</span><strong>{mockEvaluation.scores?.communication ?? 0}/5</strong></div><div><span>Structure</span><strong>{mockEvaluation.scores?.structure ?? 0}/5</strong></div></div>
-                    <div className="mock-feedback-grid">
-                      <div className="card"><div className="mini-label">WHAT WENT WELL</div><ul className="list">{safeArray(mockEvaluation.what_went_well).map((x,i)=><li key={`mw-${i}`}>{x}</li>)}</ul></div>
-                      <div className="card"><div className="mini-label">FIX THIS</div><ul className="list">{safeArray(mockEvaluation.issues_to_fix).map((x,i)=><li key={`mi-${i}`}>{x}</li>)}</ul></div>
-                      <div className="card"><div className="mini-label">TECHNICAL ACCURACY</div><ul className="list">{safeArray(mockEvaluation.technical_accuracy_issues).map((x,i)=><li key={`mt-${i}`}>{x}</li>)}</ul></div>
-                      <div className="card"><div className="mini-label">STAR / STRUCTURE</div><p className="mock-coach-text">{mockEvaluation.star_feedback || "Not a behavioral question."}</p></div>
-                    </div>
-                    <div className="card"><div className="mini-label">STRONGER ANSWER DIRECTION</div><p className="mock-coach-text">{mockEvaluation.stronger_answer_direction || "—"}</p><div className="mini-label" style={{marginTop:16}}>MUST INCLUDE NEXT TIME</div><div className="tags">{safeArray(mockEvaluation.must_include_next_time).map((x,i)=><Tag key={`mn-${i}`}>{x}</Tag>)}</div></div>
-                    <div className="card" style={{marginTop:14}}><div className="mini-label">LIKELY FOLLOW-UPS</div><ul className="list">{safeArray(mockEvaluation.follow_up_questions).map((x,i)=><li key={`mf-${i}`}>{x}</li>)}</ul><p className="mock-coach-text">{mockEvaluation.coach_note || ""}</p></div>
-                    <div className="button-row"><button className="button" onClick={nextMockQuestion}>{mockIndex >= (mockInterview.questions?.length || 1) - 1 ? "Finish Interview" : "Next Question"}</button></div>
-                  </div>}
-                </>
-              )}
-            </div>
-          </section>
-
-          <section className="section" id="interview-history">
+          <section className={`section ${activeSection === "interview-history" ? "is-active" : "is-hidden"}`} id="interview-history">
             <SectionHeader eyebrow="10 / INTERVIEW ANALYTICS" title="Turn Practice Into Progress" description="Track mock interview performance over time and focus your next practice session on the weakest area." />
             <div className="card">
               {!interviewHistory?.sessions?.length ? (
@@ -7260,7 +7182,7 @@ export default function Home() {
             </div>
           </section>
 
-          <section className="section" id="application-decision">
+          <section className={`section ${activeSection === "application-decision" ? "is-active" : "is-hidden"}`} id="application-decision">
             <SectionHeader eyebrow="11 / APPLY DECISION ENGINE" title="Decide What to Apply to Now" description="Combine job fit, cybersecurity skill gaps, career value, and interview readiness into a practical apply-or-upskill decision." />
             <div className="card">
               {!applicationDecision ? (
@@ -7304,7 +7226,7 @@ export default function Home() {
             </div>
           </section>
 
-          <section className="section" id="application-tracker">
+          <section className={`section ${activeSection === "application-tracker" ? "is-active" : "is-hidden"}`} id="application-tracker">
             <SectionHeader
               eyebrow="12 / DEADLINE INTELLIGENCE"
               title="Application Command Center"
@@ -7362,12 +7284,10 @@ export default function Home() {
             </div>
           </section>
 
-          <section
-            className="section"
-            id="applications"
+          <section className={`section ${activeSection === "applications" ? "is-active" : "is-hidden"}`} id="applications"
           >
             <SectionHeader
-              eyebrow="13 / APPLICATION INTELLIGENCE"
+              eyebrow="APPLICATION INTELLIGENCE"
               title="Application Tracker"
               description="Track the cybersecurity jobs you actually intend to apply to."
             />
@@ -7451,9 +7371,7 @@ export default function Home() {
                           >
                             <td>
                               <strong>
-                                {
-                                  application.job_title
-                                }
+                                {application.url ? <a href={application.url} target="_blank" rel="noopener noreferrer" className="cp-apply-link">{application.job_title} ↗ <small>Apply / View posting</small></a> : application.job_title}
                               </strong>
 
                               <div className="muted">
@@ -7591,7 +7509,7 @@ export default function Home() {
               ===================================================== */}
 
           {resumeText && (
-            <section className="section">
+            <section className={`section ${activeSection === "resume" ? "is-active" : "is-hidden"}`}>
               <SectionHeader
                 eyebrow="11 / SOURCE"
                 title="Original Resume Text"
@@ -7599,8 +7517,10 @@ export default function Home() {
               />
 
               <div className="card">
+                <p className="muted">Review the extracted text below. You can edit it if the PDF formatting is incorrect.</p>
                 <textarea
-                  className="textarea"
+                  className="textarea resume-original-text"
+                  rows={16}
                   value={resumeText}
                   onChange={(event) =>
                     setResumeText(

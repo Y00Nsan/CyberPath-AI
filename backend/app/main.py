@@ -1,35 +1,41 @@
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI
 from pypdf import PdfReader
 from sqlalchemy import Column, DateTime, Float, Integer, String, Text, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+
+from app.intelligence.skill_engine import compare_skills, extract_skills, graph_neighbors, skill_evidence
+from app.intelligence.knowledge_base import SKILLS
+try:
+    from app.intelligence.knowledge_base import NICE_MAP
+except ImportError:
+    NICE_MAP = {}
+from app.intelligence.scoring_engine import calculate_job_fit
+from app.intelligence.local_engine import LocalAI
+from app.intelligence.adaptive_engine import record_skill_signal, get_skill_signals, record_outcome, insights
 
 
 # =========================================================
 # ENV
 # =========================================================
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=False)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
-ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
+ADZUNA_APP_ID = (os.getenv("ADZUNA_APP_ID") or "").strip()
+ADZUNA_APP_KEY = (os.getenv("ADZUNA_APP_KEY") or "").strip()
+DATABASE_URL = os.getenv("DATABASE_URL") or "sqlite:///./cyberpath.db"
 
-if not OPENAI_API_KEY:
-    print("WARNING: OPENAI_API_KEY is not configured.")
-
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+client = LocalAI()
 
 
 # =========================================================
@@ -38,16 +44,13 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 app = FastAPI(
     title="CyberPath AI",
-    description="AI-powered cybersecurity career and job intelligence platform",
-    version="0.31.0",
+    description="Cybersecurity career intelligence platform powered by a deterministic local domain engine",
+    version="1.0.0-local",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=[origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if origin.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -61,7 +64,10 @@ app.add_middleware(
 Base = declarative_base()
 
 if DATABASE_URL:
-    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    engine_kwargs = {"pool_pre_ping": True}
+    if DATABASE_URL.startswith("sqlite"):
+        engine_kwargs["connect_args"] = {"check_same_thread": False}
+    engine = create_engine(DATABASE_URL, **engine_kwargs)
     SessionLocal = sessionmaker(
         autocommit=False,
         autoflush=False,
@@ -91,6 +97,11 @@ class Application(Base):
 
     deadline = Column(String(100), nullable=True)
     notes = Column(Text, nullable=True)
+
+    # Step 55 — outcome attribution snapshot. Stores skill IDs only, never raw resume/job text.
+    required_skill_ids = Column(Text, nullable=True)
+    matched_skill_ids = Column(Text, nullable=True)
+    missing_skill_ids = Column(Text, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -130,6 +141,27 @@ class ApplicationPackage(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
+class SkillStatistic(Base):
+    __tablename__ = "skill_statistics"
+    id = Column(Integer, primary_key=True, index=True)
+    skill = Column(String(255), unique=True, nullable=False, index=True)
+    observed_count = Column(Integer, default=0, nullable=False)
+    gap_count = Column(Integer, default=0, nullable=False)
+    success_count = Column(Integer, default=0, nullable=False)
+    failure_count = Column(Integer, default=0, nullable=False)
+    importance_weight = Column(Float, default=0.5, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class RecentSignal(Base):
+    __tablename__ = "recent_intelligence_signals"
+    id = Column(Integer, primary_key=True, index=True)
+    matched_skills = Column(Text, nullable=True)
+    gap_skills = Column(Text, nullable=True)
+    outcome = Column(String(50), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 class ApplicationPackagePayload(BaseModel):
     job: dict
     target_role: str = ""
@@ -145,11 +177,6 @@ if engine:
 # =========================================================
 
 def require_client():
-    if client is None:
-        raise HTTPException(
-            status_code=500,
-            detail="OPENAI_API_KEY is not configured.",
-        )
     return client
 
 
@@ -170,6 +197,885 @@ def clean_text(value, max_length=5000):
     return str(value)[:max_length]
 
 
+def persist_skill_signal(matched_skills=None, gap_skills=None, outcome=None):
+    """Persist only aggregate skill signals; never store resume/job raw text."""
+    if not SessionLocal:
+        return
+    matched_skills = matched_skills or []
+    gap_skills = gap_skills or []
+    db = SessionLocal()
+    try:
+        for skill in set(matched_skills) | set(gap_skills):
+            row = db.query(SkillStatistic).filter(SkillStatistic.skill == str(skill)).first()
+            if not row:
+                row = SkillStatistic(skill=str(skill))
+                db.add(row)
+                db.flush()
+            if skill in matched_skills:
+                row.observed_count += 1
+            if skill in gap_skills:
+                row.gap_count += 1
+            # Gap frequency increases priority; observed matches reduce it slightly.
+            total = row.observed_count + row.gap_count
+            gap_rate = row.gap_count / total if total else 0.0
+            row.importance_weight = round(max(0.05, min(0.95, 0.35 + gap_rate * 0.60)), 4)
+            row.updated_at = datetime.utcnow()
+
+        db.add(RecentSignal(
+            matched_skills=json.dumps(list(matched_skills)),
+            gap_skills=json.dumps(list(gap_skills)),
+            outcome=outcome,
+        ))
+        # Bounded short-term memory: keep only the latest 50 signal records.
+        old = db.query(RecentSignal).order_by(RecentSignal.created_at.desc()).offset(50).all()
+        for item in old:
+            db.delete(item)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _json_list(value):
+    try:
+        parsed = json.loads(value or "[]") if isinstance(value, str) else (value or [])
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+def _ensure_schema_columns():
+    """Small local migration for existing SQLite/Postgres installs."""
+    if not engine:
+        return
+    try:
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        if 'applications' not in tables:
+            return
+        existing = {c['name'] for c in inspector.get_columns('applications')}
+        additions = {
+            'required_skill_ids': 'TEXT',
+            'matched_skill_ids': 'TEXT',
+            'missing_skill_ids': 'TEXT',
+        }
+        with engine.begin() as conn:
+            for name, sql_type in additions.items():
+                if name not in existing:
+                    conn.execute(text(f'ALTER TABLE applications ADD COLUMN {name} {sql_type}'))
+    except Exception as exc:
+        print(f'Schema migration skipped: {exc}')
+
+
+def persist_outcome(outcome, skill_ids=None):
+    """Attribute outcome signals to the skills attached to that application.
+    Falls back to aggregate counters only when no skill snapshot exists.
+    """
+    if not SessionLocal:
+        return
+    outcome = str(outcome or '').lower()
+    skill_ids = [str(x) for x in (skill_ids or []) if x]
+    db = SessionLocal()
+    try:
+        rows = db.query(SkillStatistic).filter(SkillStatistic.skill.in_(skill_ids)).all() if skill_ids else []
+        if not rows:
+            rows = db.query(SkillStatistic).all()
+        success = outcome in {'offer','interview','success','hired'}
+        failure = outcome in {'rejected','failure'}
+        for row in rows:
+            if success:
+                row.success_count += 1
+                row.importance_weight = round(min(0.95, row.importance_weight + 0.015), 4)
+            elif failure:
+                row.failure_count += 1
+                row.importance_weight = round(min(0.95, row.importance_weight + 0.005), 4)
+        db.add(RecentSignal(outcome=outcome, matched_skills=json.dumps(skill_ids), gap_skills=json.dumps(skill_ids)))
+        old = db.query(RecentSignal).order_by(RecentSignal.created_at.desc()).offset(50).all()
+        for item in old:
+            db.delete(item)
+        db.commit()
+    finally:
+        db.close()
+
+_ensure_schema_columns()
+
+
+# =========================================================
+# STEP 43 — CYBERSECURITY INTELLIGENCE ENGINE
+# =========================================================
+
+@app.post("/intelligence/test")
+async def intelligence_test(payload: dict):
+    candidate_text = str(payload.get("candidate_text", ""))
+    job_text = str(payload.get("job_text", ""))
+    comparison = compare_skills(candidate_text, job_text)
+    scoring = calculate_job_fit(candidate_text, job_text, comparison)
+    record_skill_signal(comparison.get("required_skills", []), comparison.get("strong_matches", []), comparison.get("skill_gaps", []))
+    persist_skill_signal(comparison.get("strong_matches", []), comparison.get("skill_gaps", []))
+    return {
+        "engine": "CyberPath Cybersecurity Intelligence Engine",
+        "version": "1.0-local",
+        "candidate_skills": comparison.get("candidate_skills", []),
+        "job_skills": comparison.get("required_skills", []),
+        "strong_matches": comparison.get("strong_matches", []),
+        "partial_matches": comparison.get("related_gaps", []),
+        "missing_skills": comparison.get("skill_gaps", []),
+        "scoring": scoring,
+    }
+
+@app.post("/intelligence/feedback")
+async def intelligence_feedback(payload: dict):
+    skills = payload.get("skills", [])
+    matched = payload.get("matched", [])
+    gaps = payload.get("gaps", [])
+    success = bool(payload.get("success", False))
+    record_skill_signal(skills, matched, gaps, success)
+    return {"status": "recorded", "signals": get_skill_signals()}
+
+
+@app.get("/intelligence/insights")
+async def intelligence_insights():
+    return {
+        "engine": "CyberPath Cybersecurity Intelligence Engine",
+        "learning_mode": "aggregate-only",
+        "signals": get_skill_signals(),
+    }
+
+
+@app.post("/intelligence/overview")
+async def intelligence_overview(payload: dict):
+    """Deterministic career intelligence summary. No LLM call required."""
+    candidate_text = str(payload.get("candidate_text", ""))
+    jobs = payload.get("jobs", []) or []
+
+    candidate_skills = set(extract_skills(candidate_text))
+    analyzed = []
+    gap_counts = {}
+
+    for job in jobs[:30]:
+        if isinstance(job, str):
+            title, description = "Job", job
+        else:
+            title = str(job.get("title", "Job"))
+            description = str(job.get("description", ""))
+            if not description:
+                description = " ".join(str(job.get(k, "")) for k in ("title", "summary", "requirements"))
+
+        comparison = compare_skills(candidate_text, description)
+        scoring = calculate_job_fit(candidate_text, description, comparison)
+        for item in comparison["missing_skills"]:
+            gap_counts[item["id"]] = gap_counts.get(item["id"], 0) + 1
+
+        analyzed.append({
+            "title": title,
+            "fit_score": scoring["fit_score"],
+            "cybersecurity_relevance": scoring["cybersecurity_relevance"],
+            "missing": [x["name"] for x in comparison["missing_skills"]],
+        })
+
+    analyzed.sort(key=lambda x: (x["fit_score"], x["cybersecurity_relevance"]), reverse=True)
+    top_gaps = sorted(gap_counts.items(), key=lambda x: x[1], reverse=True)[:6]
+    gap_details = [{"skill": _skill_meta(k).get("name", k), "category": _skill_meta(k).get("category", "Cybersecurity"), "nice": _skill_meta(k).get("nice", ""), "frequency": v} for k, v in top_gaps if k in SKILLS]
+
+    next_skill = gap_details[0]["skill"] if gap_details else (_skill_meta(next(iter(candidate_skills))).get("name", next(iter(candidate_skills))) if candidate_skills else "Build your cybersecurity profile")
+    recommendation = "Apply to the strongest-fit jobs while closing the top repeated gap." if analyzed and analyzed[0]["fit_score"] >= 70 else "Strengthen the top repeated cybersecurity skill gap before prioritizing applications." if gap_details else "Add a resume and analyze jobs to activate the intelligence engine."
+
+    return {
+        "engine": "CyberPath Cybersecurity Intelligence Engine",
+        "version": "0.3",
+        "candidate_skill_count": len(candidate_skills),
+        "jobs_analyzed": len(analyzed),
+        "average_fit": round(sum(x["fit_score"] for x in analyzed) / len(analyzed)) if analyzed else 0,
+        "best_job": analyzed[0] if analyzed else None,
+        "top_skill_gaps": gap_details,
+        "next_best_skill": next_skill,
+        "recommendation": recommendation,
+        "signals": get_skill_signals(),
+        "method": "deterministic-domain-engine",
+    }
+
+
+@app.post("/intelligence/profile")
+async def intelligence_profile(payload: dict):
+    """Build a compact, deterministic cybersecurity profile from resume text.
+
+    This endpoint intentionally stores no resume text. It returns explainable
+    domain signals that can be displayed by the UI and reused by later engines.
+    """
+    candidate_text = str(payload.get("candidate_text", ""))
+    if not candidate_text.strip():
+        raise HTTPException(status_code=400, detail="candidate_text is required.")
+
+    candidate_ids = extract_skills(candidate_text)
+    candidate = [_skill_meta(sid) for sid in candidate_ids if sid in SKILLS]
+
+    categories = {}
+    for item in candidate:
+        categories[item["category"]] = categories.get(item["category"], 0) + 1
+
+    raw_signals = get_skill_signals()
+    if isinstance(raw_signals, dict):
+        observed = dict(raw_signals.get("top_skills", []))
+        gaps = dict(raw_signals.get("top_gaps", []))
+        signals = [{"skill": sid, "matched": observed.get(sid, 0), "gap": gaps.get(sid, 0)} for sid in set(observed) | set(gaps)]
+    else:
+        signals = raw_signals or []
+    signal_by_skill = {item.get("skill"): item for item in signals if isinstance(item, dict)}
+
+    strengths = []
+    development = []
+    for item in candidate:
+        signal = signal_by_skill.get(item["id"], {})
+        if signal.get("matched", 0) >= signal.get("gap", 0):
+            strengths.append(item["name"])
+        else:
+            development.append(item["name"])
+
+    return {
+        "engine": "CyberPath Cybersecurity Intelligence Engine",
+        "version": "0.3",
+        "skill_count": len(candidate),
+        "skills": candidate,
+        "category_coverage": sorted(
+            [{"category": k, "count": v} for k, v in categories.items()],
+            key=lambda x: x["count"],
+            reverse=True,
+        ),
+        "strength_signals": strengths[:10],
+        "development_signals": development[:10],
+        "adaptive_signals": signals,
+        "method": "deterministic-domain-engine",
+        "privacy": "aggregate-signals-only; resume text is not persisted by this endpoint",
+    }
+
+
+
+# =========================================================
+# STEPS 55–58 — CALIBRATION, QUALITY, TAILORING, CAREER INTELLIGENCE
+# =========================================================
+
+def _skill_outcome_stats():
+    if not SessionLocal:
+        return {}
+    db=SessionLocal()
+    try:
+        result={}
+        for row in db.query(SkillStatistic).all():
+            attempts=row.success_count + row.failure_count
+            outcome_rate=(row.success_count/attempts*100) if attempts else None
+            result[row.skill]={
+                'importance_weight': row.importance_weight,
+                'observed_count': row.observed_count,
+                'gap_count': row.gap_count,
+                'success_count': row.success_count,
+                'failure_count': row.failure_count,
+                'outcome_rate': round(outcome_rate,1) if outcome_rate is not None else None,
+            }
+        return result
+    finally:
+        db.close()
+
+def _calibrated_fit(comparison, base_fit):
+    stats=_skill_outcome_stats()
+    required=comparison.get('required_skills',[])
+    matched=set(comparison.get('strong_matches',[]))
+    if not required:
+        return round(base_fit,1), 0.0
+    weighted_total=0.0
+    weighted_match=0.0
+    for sid in required:
+        st=stats.get(sid,{})
+        weight=float(st.get('importance_weight',0.5))
+        outcome=st.get('outcome_rate')
+        if outcome is not None:
+            weight=min(0.95, max(0.05, weight*(0.75+outcome/400)))
+        weighted_total += weight
+        if sid in matched:
+            weighted_match += weight
+    dynamic=(weighted_match/weighted_total*100) if weighted_total else base_fit
+    calibrated=round(base_fit*0.65 + dynamic*0.35,1)
+    return calibrated, round(dynamic,1)
+
+def _job_quality(jobs):
+    if not jobs:
+        return {'count':0,'duplicates_removed':0,'cyber_relevant_count':0,'average_description_length':0,'quality_score':0,'notes':['No jobs returned from the source.']}
+    seen=set(); dup=0; relevant=0; lengths=[]
+    for j in jobs:
+        key=(str(j.get('title','')).lower().strip(),str(j.get('company','')).lower().strip(),str(j.get('location','')).lower().strip())
+        if key in seen: dup+=1
+        seen.add(key)
+        text=' '.join(str(j.get(k,'')) for k in ('title','description','summary','requirements')).lower()
+        if any(k in text for k in ('cybersecurity','security','soc','siem','incident response','threat intelligence','iam','vulnerability','cloud security')):
+            relevant+=1
+        lengths.append(len(text))
+    completeness=sum(1 for j in jobs if j.get('title') and j.get('company') and (j.get('description') or j.get('summary'))) / len(jobs)
+    relevance=relevant/len(jobs)
+    quality=round(min(100,max(0,completeness*45+relevance*45+min(1,sum(lengths)/max(1,len(jobs))/1000)*10)),1)
+    return {'count':len(jobs),'duplicates_removed':dup,'cyber_relevant_count':relevant,'average_description_length':round(sum(lengths)/len(lengths)), 'quality_score':quality,'notes':['Job-source quality is heuristic and should be monitored as providers change.']}
+
+def _career_intelligence_payload():
+    funnel=_application_outcome_stats()
+    stats=_skill_outcome_stats()
+    ranked=sorted(stats.items(), key=lambda kv:(kv[1].get('importance_weight',0),kv[1].get('gap_count',0)), reverse=True)
+    strengths=sorted(stats.items(), key=lambda kv:((kv[1].get('outcome_rate') or -1),kv[1].get('success_count',0)), reverse=True)
+    top_gap=ranked[0][0] if ranked else ''
+    top_success=next((k for k,v in strengths if v.get('success_count',0)>0), '')
+    sample=funnel.get('sent',0)
+    confidence='High' if sample>=20 else 'Medium' if sample>=5 else 'Low'
+    return {
+        'engine':'CyberPath Career Intelligence v2.0',
+        'sample_size':sample,
+        'confidence':confidence,
+        'funnel':funnel,
+        'next_best_skill':_skill_meta(top_gap).get('name',top_gap) if top_gap else 'Analyze more jobs',
+        'best_success_signal':_skill_meta(top_success).get('name',top_success) if top_success else 'No outcome signal yet',
+        'top_skill_signals':[{'skill':_skill_meta(k).get('name',k),**v} for k,v in ranked[:10]],
+        'recommendation': ('Prioritize high-fit jobs and keep collecting outcomes before making large strategy changes.' if sample<5 else 'Use the strongest repeated skill gaps as learning priorities and the strongest outcome signals as targeting evidence.'),
+        'limitations':['Small samples can produce unstable patterns.'] if sample<5 else [],
+    }
+
+# =========================================================
+# STEPS 51–53 — CLOSED-LOOP CYBER INTELLIGENCE
+# =========================================================
+
+def _skill_ids_from_text(text: str):
+    return extract_skills(str(text or ""))
+
+def _skill_meta(skill_id):
+    aliases = SKILLS.get(skill_id, [])
+    nice = NICE_MAP.get(skill_id, {})
+    display_names = {
+        "aws_iam": "AWS IAM", "siem": "SIEM", "osint": "OSINT",
+        "wireshark": "Wireshark", "aws": "AWS", "cti": "CTI",
+        "security_plus": "Security+", "api_security": "API Security",
+    }
+    return {
+        "id": skill_id,
+        "name": display_names.get(skill_id, skill_id.replace("_", " ").title()),
+        "aliases": aliases if isinstance(aliases, list) else [],
+        "category": nice.get("category", "Cybersecurity"),
+        "nice": ", ".join(nice.get("work_roles", [])),
+    }
+
+def _skill_objects(ids):
+    return [_skill_meta(sid) for sid in ids if sid in SKILLS]
+
+def _job_intelligence(candidate_text: str, job: dict):
+    title = str(job.get("title", "Job"))
+    description = " ".join([
+        str(job.get("description", "")),
+        str(job.get("summary", "")),
+        str(job.get("requirements", "")),
+        title,
+    ])
+    comparison = compare_skills(candidate_text, description)
+    scoring = calculate_job_fit(candidate_text, description, comparison)
+
+    required = comparison.get("required_skills", [])
+    missing = comparison.get("skill_gaps", [])
+    matched = comparison.get("strong_matches", [])
+    partial = comparison.get("related_gaps", [])
+
+    nice_roles = {}
+    for sid in required:
+        item = _skill_meta(sid)
+        for role in item.get("nice", "").split(","):
+            role = role.strip()
+            if role:
+                nice_roles[role] = nice_roles.get(role, 0) + 1
+
+    top_role = max(nice_roles, key=nice_roles.get) if nice_roles else ""
+    gap_priority = []
+    for sid in missing:
+        item = _skill_meta(sid)
+        stat_weight = 0.5
+        if SessionLocal:
+            db = SessionLocal()
+            try:
+                row = db.query(SkillStatistic).filter(SkillStatistic.skill == sid).first()
+                if row:
+                    stat_weight = row.importance_weight
+            finally:
+                db.close()
+        gap_priority.append({
+            "skill": _skill_meta(sid).get("name", sid),
+            "skill_id": sid,
+            "priority": round(stat_weight * 100),
+            "importance": "High" if stat_weight >= .7 else "Medium" if stat_weight >= .45 else "Low",
+            "reason": "Required by this job and not strongly evidenced in the candidate profile.",
+            "recommended_action": f"Build demonstrable evidence for {item.get('name', sid)}."
+        })
+    gap_priority.sort(key=lambda x: x["priority"], reverse=True)
+
+    relevance = float(scoring.get("cybersecurity_relevance", 0))
+    fit = float(scoring.get("fit_score", 0))
+    fit, adaptive_skill_match = _calibrated_fit(comparison, fit)
+    career_value = round(min(100, relevance * .55 + fit * .30 + (15 if top_role else 0)), 1)
+    priority = "High" if fit >= 70 and relevance >= 60 else "Medium" if fit >= 50 or relevance >= 45 else "Low"
+
+    persist_skill_signal(
+        [x if isinstance(x, str) else x.get("id", "") for x in matched],
+        [x if isinstance(x, str) else x.get("id", "") for x in missing],
+    )
+
+    return {
+        **job,
+        "fit_score": round(fit, 1),
+        "cybersecurity_relevance": round(relevance, 1),
+        "career_value": career_value,
+        "adaptive_skill_match": adaptive_skill_match,
+        "strong_matches": [
+            _skill_meta(x if isinstance(x, str) else x.get("id", "")).get("name", x if isinstance(x, str) else x.get("name", ""))
+            for x in matched
+        ],
+        "partial_matches": [
+            _skill_meta(x if isinstance(x, str) else x.get("id", "")).get("name", x if isinstance(x, str) else x.get("name", ""))
+            for x in partial
+        ],
+        "missing_skills": [
+            _skill_meta(x if isinstance(x, str) else x.get("id", "")).get("name", x if isinstance(x, str) else x.get("name", ""))
+            for x in missing
+        ],
+        "required_skill_ids": required,
+        "matched_skill_ids": [x if isinstance(x,str) else x.get("id","") for x in matched],
+        "missing_skill_ids": [x if isinstance(x,str) else x.get("id","") for x in missing],
+        "skill_gap_priority": gap_priority[:8],
+        "nice_work_role": top_role,
+        "application_priority": priority,
+        "application_priority_reason": (
+            "Strong cybersecurity fit and meaningful career alignment."
+            if priority == "High" else
+            "Worth considering while closing the highest-impact gaps."
+            if priority == "Medium" else
+            "Lower fit or weaker cybersecurity alignment than the current target."
+        ),
+        "analysis_method": "skill-graph + NICE-aligned + evidence + adaptive-weighted",
+    }
+
+@app.post("/intelligence/job-search")
+async def intelligence_job_search(
+    resume_profile: str = Form(""),
+    target_role: str = Form(...),
+    location: str = Form(""),
+    max_jobs: int = Form(20),
+    min_fit_score: int = Form(0),
+    min_cybersecurity_relevance: int = Form(0),
+    employment_type: str = Form("all"),
+    company_name: str = Form(""),
+):
+    # Start with the requested role and location. If there are no postings,
+    # retry with common cybersecurity titles, then without the location filter.
+    # Never silently label broadened results as local matches.
+    role = target_role.strip()
+    aliases = [role]
+    lowered = role.lower()
+    if any(token in lowered for token in ("soc", "security analyst", "cybersecurity analyst", "cyber security analyst")):
+        aliases += ["security analyst", "cybersecurity"]
+    elif "penetration" in lowered or "pentest" in lowered:
+        aliases += ["penetration tester", "security engineer"]
+    else:
+        aliases += ["cybersecurity", "information security"]
+    queries = list(dict.fromkeys(q for q in aliases if q))
+    if company_name.strip():
+        queries = [f"{role} {company_name.strip()}", company_name.strip()]
+    all_jobs = []
+    source_errors = []
+    search_attempts = []
+    expanded_location = False
+    for place in ([location, ""] if location.strip() else [""]):
+        for query in queries:
+            try:
+                found = await search_adzuna(query=query, location=place, results_per_page=20)
+                search_attempts.append({"query": query, "location": place, "count": len(found)})
+                all_jobs.extend(normalize_job(x) for x in found)
+            except Exception as exc:
+                reason = exc.detail if isinstance(exc, HTTPException) else f"{type(exc).__name__}: {exc}"
+                source_errors.append(str(reason))
+                print(f"Job source failed for {query!r} in {place!r}: {reason}")
+        if all_jobs:
+            expanded_location = bool(location.strip() and not place)
+            break
+
+    unique = {}
+    for job in all_jobs:
+        key = str(job.get("id") or f"{job.get('title','')}|{job.get('company','')}|{job.get('url','')}")
+        unique[key] = job
+
+    # Analyze the deduplicated candidate set before filtering so the score controls
+    # in the UI have real effect rather than silently being ignored.
+    jobs = list(unique.values())
+    # Strict company filtering: never show another company's jobs as matches.
+    if company_name.strip():
+        company_needle = company_name.strip().casefold()
+        jobs = [j for j in jobs if company_needle in str(j.get("company", "")).casefold()]
+    kind = employment_type.strip().lower()
+    if kind in {"internship", "part_time", "full_time"}:
+        def matches_employment(job):
+            title = str(job.get("title") or "").casefold()
+            description = str(job.get("description") or "").casefold()
+            contract = str(job.get("contract_type") or "").casefold()
+            if kind == "internship":
+                return any(word in title or word in description[:350] for word in ("intern", "internship", "co-op", "co op"))
+            if kind == "part_time":
+                return "part_time" in contract or "part-time" in title or "part time" in title
+            return ("full_time" in contract or "full-time" in title or "full time" in title) and not any(word in title for word in ("intern", "part-time", "part time"))
+        jobs = [j for j in jobs if matches_employment(j)]
+    analyzed = [_job_intelligence(resume_profile, job) for job in jobs]
+    unfiltered_count = len(analyzed)
+    fit_floor = max(0, min(100, int(min_fit_score or 0)))
+    relevance_floor = max(0, min(100, int(min_cybersecurity_relevance or 0)))
+    analyzed = [
+        job for job in analyzed
+        if float(job.get("fit_score", 0) or 0) >= fit_floor
+        and float(job.get("cybersecurity_relevance", 0) or 0) >= relevance_floor
+    ]
+    analyzed.sort(key=lambda x: (x["fit_score"], x["cybersecurity_relevance"], x["career_value"]), reverse=True)
+    analyzed = analyzed[:max(1, min(int(max_jobs or 20), 25))]
+
+    gap_counts = {}
+    for job in analyzed:
+        for gap in job["skill_gap_priority"]:
+            gap_counts[gap["skill_id"]] = gap_counts.get(gap["skill_id"], 0) + 1
+
+    repeated = []
+    for sid, count in sorted(gap_counts.items(), key=lambda x: x[1], reverse=True)[:12]:
+        item = SKILLS.get(sid, {})
+        repeated.append({
+            "skill": _skill_meta(sid).get("name", sid),
+            "skill_id": sid,
+            "job_count": count,
+            "importance": "High" if count >= 4 else "Medium" if count >= 2 else "Low",
+            "nice_category": _skill_meta(sid).get("category", ""),
+        })
+
+    next_skill = repeated[0] if repeated else None
+    return {
+        "count": len(analyzed),
+        "filters": {"min_fit_score": fit_floor, "min_cybersecurity_relevance": relevance_floor, "employment_type": kind, "company_name": company_name.strip()},
+        "jobs": analyzed,
+        "data_quality": _job_quality(analyzed),
+        "calibration": {"engine": "outcome-aware skill weighting", "uses_application_outcomes": True},
+        "aggregate": {
+            "average_fit_score": round(sum(x["fit_score"] for x in analyzed)/len(analyzed), 1) if analyzed else 0,
+            "average_cybersecurity_relevance": round(sum(x["cybersecurity_relevance"] for x in analyzed)/len(analyzed), 1) if analyzed else 0,
+            "repeated_missing_skills": repeated,
+            "next_best_skill": next_skill,
+            "nice_work_role": analyzed[0]["nice_work_role"] if analyzed else "",
+        },
+        "pipeline": ["Job", "Requirement Extraction", "Skill Normalization", "Skill Graph", "NICE Work Role", "Evidence", "Fit Score", "Skill Gap", "Next Skill"],
+        "engine": "CyberPath Cybersecurity Job Intelligence v1.0",
+        "search_attempts": search_attempts,
+        "expanded_location": expanded_location,
+        "source_status": "ok" if analyzed else ("filtered" if unfiltered_count else "error" if source_errors else "empty"),
+        "source_errors": list(dict.fromkeys(source_errors))[:3],
+        "source_message": ("" if analyzed else
+            f"Found {unfiltered_count} jobs, but none passed the fit/relevance filters. Lower the filters and retry." if unfiltered_count else
+            "Adzuna request failed: " + " | ".join(dict.fromkeys(source_errors)) if source_errors else
+            "No listings matched your company or employment-type filters. Try removing a filter or searching another role." if company_name.strip() or kind != "all" else
+            "No live listings were found after trying related cybersecurity roles and a wider location. Try a different role or check Adzuna coverage."),
+    }
+
+LEARNING_CATALOG = {
+    "aws": {
+        "difficulty": "Beginner",
+        "youtube": "https://www.youtube.com/results?search_query=AWS+security+fundamentals",
+        "official": "https://docs.aws.amazon.com/security/",
+        "lab": "https://tryhackme.com/search?query=aws",
+        "course": "AWS Skill Builder — AWS security learning",
+        "project": "Build a small AWS security baseline with IAM, CloudTrail, least privilege, and documented findings.",
+        "time": "1–2 weeks",
+    },
+    "aws_iam": {
+        "difficulty": "Beginner",
+        "youtube": "https://www.youtube.com/results?search_query=AWS+IAM+security",
+        "official": "https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html",
+        "lab": "https://tryhackme.com/search?query=AWS%20IAM",
+        "course": "AWS Skill Builder — IAM fundamentals",
+        "project": "Create an IAM least-privilege lab with roles, policies, access analysis, and a security review.",
+        "time": "1 week",
+    },
+    "cloud_security": {
+        "difficulty": "Intermediate",
+        "youtube": "https://www.youtube.com/results?search_query=cloud+security+fundamentals",
+        "official": "https://aws.amazon.com/security/",
+        "lab": "https://tryhackme.com/search?query=cloud%20security",
+        "course": "AWS Skill Builder — Cloud security",
+        "project": "Design a cloud security architecture and threat model for a small application.",
+        "time": "2–3 weeks",
+    },
+    "siem": {
+        "difficulty": "Beginner–Intermediate",
+        "youtube": "https://www.youtube.com/results?search_query=SIEM+Splunk+security+analyst",
+        "official": "https://www.splunk.com/en_us/training.html",
+        "lab": "https://tryhackme.com/search?query=SIEM",
+        "course": "Splunk free training",
+        "project": "Build a small SIEM investigation lab and document detection, triage, and escalation steps.",
+        "time": "1–2 weeks",
+    },
+    "security_monitoring": {
+        "difficulty": "Beginner",
+        "youtube": "https://www.youtube.com/results?search_query=SOC+security+monitoring",
+        "official": "https://www.cisa.gov/topics/cyber-threats-and-advisories",
+        "lab": "https://tryhackme.com/search?query=SOC",
+        "course": "TryHackMe SOC learning paths",
+        "project": "Create a mini SOC dashboard with sample logs, detection rules, and an incident timeline.",
+        "time": "1–2 weeks",
+    },
+    "incident_response": {
+        "difficulty": "Intermediate",
+        "youtube": "https://www.youtube.com/results?search_query=incident+response+cybersecurity",
+        "official": "https://www.cisa.gov/topics/cyber-threats-and-advisories",
+        "lab": "https://tryhackme.com/search?query=incident%20response",
+        "course": "TryHackMe incident response content",
+        "project": "Run a simulated ransomware incident from alert triage through containment and lessons learned.",
+        "time": "2 weeks",
+    },
+    "threat_intelligence": {
+        "difficulty": "Intermediate",
+        "youtube": "https://www.youtube.com/results?search_query=cyber+threat+intelligence+MITRE+ATT%26CK",
+        "official": "https://attack.mitre.org/",
+        "lab": "https://tryhackme.com/search?query=threat%20intelligence",
+        "course": "MITRE ATT&CK resources",
+        "project": "Produce a CTI report mapping a real threat actor to ATT&CK techniques and defensive recommendations.",
+        "time": "1–2 weeks",
+    },
+    "network_security": {
+        "difficulty": "Beginner–Intermediate",
+        "youtube": "https://www.youtube.com/results?search_query=network+security+Wireshark",
+        "official": "https://www.wireshark.org/docs/",
+        "lab": "https://tryhackme.com/search?query=network%20security",
+        "course": "Wireshark documentation and training",
+        "project": "Analyze a packet capture and produce a network intrusion investigation report.",
+        "time": "1–2 weeks",
+    },
+    "wireshark": {
+        "difficulty": "Beginner",
+        "youtube": "https://www.youtube.com/results?search_query=Wireshark+tutorial+cybersecurity",
+        "official": "https://www.wireshark.org/docs/",
+        "lab": "https://tryhackme.com/search?query=Wireshark",
+        "course": "Wireshark User's Guide",
+        "project": "Build a packet-analysis casebook with filters, findings, indicators, and conclusions.",
+        "time": "1 week",
+    },
+    "linux": {
+        "difficulty": "Beginner",
+        "youtube": "https://www.youtube.com/results?search_query=Linux+for+cybersecurity",
+        "official": "https://linuxjourney.com/",
+        "lab": "https://tryhackme.com/search?query=linux",
+        "course": "Linux Journey",
+        "project": "Harden a Linux VM and document users, permissions, services, logs, and monitoring.",
+        "time": "1–2 weeks",
+    },
+    "python": {
+        "difficulty": "Beginner–Intermediate",
+        "youtube": "https://www.youtube.com/results?search_query=Python+for+cybersecurity",
+        "official": "https://docs.python.org/3/",
+        "lab": "https://tryhackme.com/search?query=python",
+        "course": "Python official tutorial",
+        "project": "Build a defensive log/IOC triage tool that parses indicators and produces a report.",
+        "time": "1–2 weeks",
+    },
+    "malware_analysis": {
+        "difficulty": "Intermediate",
+        "youtube": "https://www.youtube.com/results?search_query=malware+analysis+Ghidra",
+        "official": "https://ghidra-sre.org/",
+        "lab": "https://tryhackme.com/search?query=malware%20analysis",
+        "course": "Ghidra documentation",
+        "project": "Analyze a safe sample and document static indicators, functions, and behavioral hypotheses.",
+        "time": "2–3 weeks",
+    },
+    "digital_forensics": {
+        "difficulty": "Intermediate",
+        "youtube": "https://www.youtube.com/results?search_query=digital+forensics+Autopsy",
+        "official": "https://www.sleuthkit.org/autopsy/",
+        "lab": "https://tryhackme.com/search?query=digital%20forensics",
+        "course": "Autopsy documentation",
+        "project": "Perform a disk-image investigation and produce a forensic timeline with findings.",
+        "time": "2–3 weeks",
+    },
+    "vulnerability_management": {
+        "difficulty": "Beginner–Intermediate",
+        "youtube": "https://www.youtube.com/results?search_query=vulnerability+management+Nessus",
+        "official": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+        "lab": "https://tryhackme.com/search?query=vulnerability",
+        "course": "CISA vulnerability resources",
+        "project": "Build a vulnerability prioritization dashboard using CVSS plus asset/business impact.",
+        "time": "1–2 weeks",
+    },
+}
+
+def _learning_item(skill_id, weight=0.5):
+    item = _skill_meta(skill_id)
+    c = LEARNING_CATALOG.get(skill_id, LEARNING_CATALOG.get("security_monitoring"))
+    return {
+        "skill": item.get("name", skill_id),
+        "skill_id": skill_id,
+        "priority": round(weight * 100),
+        "difficulty": c["difficulty"],
+        "why_it_matters": f"This skill is a current gap and its adaptive importance is {round(weight*100)}%.",
+        "youtube": [{"title": "YouTube search", "provider": "YouTube", "url": c["youtube"]}],
+        "free_courses": [{"title": c["course"], "provider": "Free / official", "url": c["official"]}],
+        "official_docs": [{"title": f"{item.get('name', skill_id)} official/reference", "provider": "Official", "url": c["official"]}],
+        "hands_on_labs": [{"title": "Hands-on lab search", "provider": "TryHackMe", "url": c["lab"]}],
+        "project": c["project"],
+        "estimated_time": c["time"],
+    }
+
+@app.post("/intelligence/learning-plan")
+async def intelligence_learning_plan(
+    resume_profile: str = Form(""),
+    target_role: str = Form(""),
+    missing_skills: str = Form(""),
+    jobs_data: str = Form("[]"),
+):
+    candidate_ids = set(_skill_ids_from_text(resume_profile))
+    requested = _skill_ids_from_text(missing_skills)
+
+    # If the caller supplied names rather than canonical IDs, derive gaps from jobs.
+    if not requested:
+        try:
+            jobs = json.loads(jobs_data or "[]")
+        except Exception:
+            jobs = []
+        counts = {}
+        for job in jobs if isinstance(jobs, list) else []:
+            desc = job.get("description", "") if isinstance(job, dict) else str(job)
+            comp = compare_skills(resume_profile, desc)
+            for sid in comp.get("skill_gaps", []):
+                sid = sid if isinstance(sid, str) else sid.get("id", "")
+                if sid:
+                    counts[sid] = counts.get(sid, 0) + 1
+        requested = [sid for sid, _ in sorted(counts.items(), key=lambda x:x[1], reverse=True)]
+
+    stats = {}
+    if SessionLocal:
+        db = SessionLocal()
+        try:
+            for row in db.query(SkillStatistic).all():
+                stats[row.skill] = row.importance_weight
+        finally:
+            db.close()
+
+    scored = []
+    for sid in requested:
+        if sid in candidate_ids:
+            continue
+        scored.append((sid, stats.get(sid, 0.55)))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    scored = scored[:6]
+
+    roadmap = [_learning_item(sid, weight) for sid, weight in scored]
+    certifications = []
+    if any(sid in {"aws", "aws_iam", "cloud_security"} for sid, _ in scored):
+        certifications.append({"name":"AWS Certified Developer/Cloud-oriented security learning", "priority":1, "reason":"Only pursue after practical AWS evidence is built.","best_for":"Cloud/security-adjacent roles","difficulty":"Intermediate"})
+    elif any(sid in {"security_monitoring","siem","incident_response"} for sid, _ in scored):
+        certifications.append({"name":"CompTIA Security+", "priority":1, "reason":"Useful baseline certification for broad cybersecurity internships.","best_for":"SOC/security analyst roles","difficulty":"Intermediate"})
+
+    next_item = roadmap[0] if roadmap else None
+    return {
+        "engine": "CyberPath Learning Intelligence v1.0",
+        "target_role": target_role,
+        "next_best_skill": {
+            "skill": next_item["skill"] if next_item else "No major gap detected",
+            "reason": next_item["why_it_matters"] if next_item else "Analyze more cybersecurity jobs to discover repeated gaps.",
+            "career_impact": "High" if next_item and next_item["priority"] >= 70 else "Medium",
+        },
+        "skill_roadmap": roadmap,
+        "certifications": certifications,
+        "learning_order": [x["skill"] for x in roadmap],
+        "career_strategy": "Learn one high-impact skill, produce proof, then feed the outcome back into the application engine.",
+    }
+
+def _application_outcome_stats():
+    if not SessionLocal:
+        return {}
+    db = SessionLocal()
+    try:
+        rows = db.query(Application).all()
+        counts = {"Saved":0,"Applied":0,"Interview":0,"Offer":0,"Rejected":0}
+        for r in rows:
+            key = str(r.status or "Saved").strip().title()
+            if key in counts:
+                counts[key] += 1
+        sent = counts["Applied"] + counts["Interview"] + counts["Offer"] + counts["Rejected"]
+        interviews = counts["Interview"] + counts["Offer"]
+        offers = counts["Offer"]
+        return {
+            **counts,
+            "sent": sent,
+            "application_to_interview_rate": round(interviews/sent*100, 1) if sent else 0,
+            "interview_to_offer_rate": round(offers/interviews*100, 1) if interviews else 0,
+        }
+    finally:
+        db.close()
+
+@app.get("/intelligence/outcomes")
+async def intelligence_outcomes():
+    funnel = _application_outcome_stats()
+    if not SessionLocal:
+        return {"funnel": funnel, "skills": [], "confidence": "Low"}
+
+    db = SessionLocal()
+    try:
+        stats = db.query(SkillStatistic).order_by(SkillStatistic.importance_weight.desc()).limit(25).all()
+        recent = db.query(RecentSignal).order_by(RecentSignal.created_at.desc()).limit(50).all()
+        confidence = "High" if funnel.get("sent",0) >= 20 else "Medium" if funnel.get("sent",0) >= 5 else "Low"
+        top_skill = stats[0].skill if stats else ""
+        return {
+            "engine": "CyberPath Adaptive Career Intelligence v1.0",
+            "funnel": funnel,
+            "conversion_funnel": funnel,
+            "confidence": confidence,
+            "data_quality": {
+                "sample_size": funnel.get("sent",0),
+                "confidence": confidence,
+                "limitations": ["Small samples can produce unstable patterns."] if funnel.get("sent",0) < 5 else [],
+            },
+            "outcome_summary": (
+                "Not enough sent applications to infer a reliable pattern yet."
+                if funnel.get("sent",0) < 5 else
+                f"{funnel.get('sent',0)} sent applications are feeding the adaptive engine."
+            ),
+            "skills": [{
+                "skill": r.skill,
+                "observed_count": r.observed_count,
+                "gap_count": r.gap_count,
+                "success_count": r.success_count,
+                "failure_count": r.failure_count,
+                "importance_weight": r.importance_weight,
+            } for r in stats],
+            "recent_signal_count": len(recent),
+            "next_best_skill": {"skill": _skill_meta(top_skill)["name"] if top_skill else "Collect more job signals", "why": "Highest current adaptive importance."},
+            "executive_recommendation": "Keep applying to strong-fit roles while using repeated gaps as the next learning priority.",
+            "career_intelligence": _career_intelligence_payload(),
+            "feedback_loop": [
+                "Job requirements create skill signals",
+                "Repeated gaps raise skill importance",
+                "Learning recommendations target high-importance gaps",
+                "Application/interview outcomes update success/failure signals",
+                "Future job and learning priorities use the updated weights",
+            ],
+        }
+    finally:
+        db.close()
+
+@app.post("/intelligence/outcomes/record")
+async def intelligence_outcome_record(payload: dict):
+    outcome = str(payload.get("outcome", "")).lower()
+    if outcome not in {"saved","applied","interview","offer","rejected","failure","success","hired"}:
+        raise HTTPException(status_code=400, detail="Unsupported outcome.")
+    skill_ids=[]
+    application_id=payload.get('application_id')
+    if application_id and SessionLocal:
+        db=SessionLocal()
+        try:
+            app_row=db.query(Application).filter(Application.id==int(application_id)).first()
+            if app_row:
+                skill_ids=_json_list(app_row.matched_skill_ids)+_json_list(app_row.missing_skill_ids)
+        finally:
+            db.close()
+    persist_outcome(outcome, skill_ids)
+    return await intelligence_outcomes()
+
 # =========================================================
 # ROOT
 # =========================================================
@@ -178,7 +1084,7 @@ def clean_text(value, max_length=5000):
 async def root():
     return {
         "name": "CyberPath AI",
-        "version": "0.28.0",
+        "version": "0.35.0-local-intelligence",
         "status": "running",
         "features": [
             "resume-analysis",
@@ -208,6 +1114,9 @@ async def root():
             "application-follow-up-copilot",
             "career-outcome-intelligence",
             "final-career-command-center",
+            "deterministic-cybersecurity-intelligence-engine",
+            "cybersecurity-profile-ontology-v0.3",
+            "local-first-sqlite-storage",
         ],
     }
 
@@ -243,10 +1152,10 @@ async def upload_resume(file: UploadFile = File(...)):
         pages = []
 
         for page in reader.pages:
-            text = page.extract_text() or ""
+            text = page.extract_text(extraction_mode="layout") or ""
             pages.append(text)
 
-        resume_text = "\n".join(pages).strip()
+        resume_text = "\n".join("\n".join(_resume_lines(p)) for p in pages).strip()
 
         if not resume_text:
             raise HTTPException(
@@ -269,6 +1178,18 @@ async def upload_resume(file: UploadFile = File(...)):
             detail=f"Resume extraction failed: {str(e)}",
         )
 
+
+@app.get("/intelligence/learning-state")
+async def intelligence_learning_state():
+    if not SessionLocal:
+        return {"skills": [], "recent_signal_count": 0}
+    db = SessionLocal()
+    try:
+        rows = db.query(SkillStatistic).order_by(SkillStatistic.importance_weight.desc()).limit(25).all()
+        recent = db.query(RecentSignal).count()
+        return {"skills":[{"skill":r.skill,"observed_count":r.observed_count,"gap_count":r.gap_count,"success_count":r.success_count,"failure_count":r.failure_count,"importance_weight":r.importance_weight} for r in rows],"recent_signal_count":recent}
+    finally:
+        db.close()
 
 # =========================================================
 # RESUME ANALYSIS
@@ -324,7 +1245,7 @@ Rules:
 
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=1800,
         )
@@ -342,53 +1263,60 @@ Rules:
 # TARGET ROLE
 # =========================================================
 
+ROLE_REQUIREMENTS = {
+    "soc analyst": "SIEM security monitoring incident response Linux Python threat intelligence vulnerability management network security",
+    "security operations center analyst": "SIEM security monitoring incident response Linux Python threat intelligence vulnerability management network security",
+    "cyber threat intelligence analyst": "threat intelligence OSINT malware analysis incident response Python Linux MITRE ATT&CK",
+    "threat intelligence analyst": "threat intelligence OSINT malware analysis incident response Python Linux MITRE ATT&CK",
+    "cloud security engineer": "AWS cloud security AWS IAM identity security network security Python vulnerability management",
+    "security analyst": "SIEM security monitoring incident response vulnerability management Linux Python network security threat intelligence",
+    "incident response analyst": "incident response SIEM security monitoring digital forensics malware analysis Linux Python",
+    "penetration tester": "network security Linux Python vulnerability management secure coding Wireshark",
+}
+
+def _requirements_for_role(role: str) -> str:
+    normalized = " ".join((role or "").lower().split())
+    for key, requirements in ROLE_REQUIREMENTS.items():
+        if key in normalized or normalized in key:
+            return requirements
+    return ""
+
+
 @app.post("/target-role")
 async def target_role(
     resume_profile: str = Form(...),
     target_role: str = Form(...),
 ):
-    ai = require_client()
+    """Evaluate a target role with the local cybersecurity skill engine."""
+    role = clean_text(target_role, 255).strip()
+    if not role:
+        raise HTTPException(status_code=422, detail="Target role is required.")
 
-    prompt = f"""
-You are a cybersecurity career strategist.
+    role_requirements = _requirements_for_role(role)
+    role_analysis_text = f"{role} {role_requirements}".strip()
+    comparison = compare_skills(resume_profile, role_analysis_text)
+    scoring = calculate_job_fit(resume_profile, role_analysis_text, comparison)
+    required_ids = comparison.get("required_skills", [])
+    matched_ids = comparison.get("strong_matches", [])
+    gap_ids = comparison.get("skill_gaps", [])
+    role_names = [_skill_meta(sid).get("name", sid) for sid in required_ids]
+    strength_names = [_skill_meta(sid).get("name", sid) for sid in matched_ids]
+    gap_names = [_skill_meta(sid).get("name", sid) for sid in gap_ids]
 
-Candidate Profile:
-{resume_profile}
-
-Target Role:
-{target_role}
-
-Analyze whether this target role makes sense.
-
-Return ONLY JSON:
-
-{{
-    "target_role": "",
-    "fit_score": 0,
-    "why_it_fits": [],
-    "required_skills": [],
-    "candidate_strengths": [],
-    "candidate_gaps": [],
-    "recommended_next_step": ""
-}}
-
-Do not invent experience.
-"""
-
-    try:
-        response = ai.responses.create(
-            model="gpt-5-mini",
-            input=prompt,
-            max_output_tokens=1800,
-        )
-
-        return safe_json_load(response.output_text)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Target role analysis failed: {str(e)}",
-        )
+    return {
+        "target_role": role,
+        "fit_score": scoring.get("fit_score", 0),
+        "cybersecurity_relevance": scoring.get("cybersecurity_relevance", 0),
+        "why_it_fits": [f"Your profile contains evidence of {name}." for name in strength_names],
+        "required_skills": role_names,
+        "candidate_strengths": strength_names,
+        "candidate_gaps": gap_names,
+        "recommended_next_step": (
+            f"Build demonstrable evidence for {gap_names[0]}." if gap_names
+            else "Validate this role fit against real job descriptions and apply to suitable openings."
+        ),
+        "analysis_method": "deterministic cybersecurity skill engine",
+    }
 
 
 # =========================================================
@@ -427,12 +1355,16 @@ async def search_adzuna(
         response = await http.get(url, params=params)
 
     if response.status_code != 200:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Adzuna request failed: {response.status_code}",
-        )
+        reason = ("invalid API credentials" if response.status_code in (401, 403) else
+                  "API rate limit exceeded" if response.status_code == 429 else
+                  "external API unavailable" if response.status_code >= 500 else
+                  "request rejected")
+        raise HTTPException(status_code=502, detail=f"Adzuna HTTP {response.status_code}: {reason}")
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Adzuna returned an invalid JSON response")
 
     return data.get("results", [])
 
@@ -708,7 +1640,7 @@ Rules:
 
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=6000,
         )
@@ -885,84 +1817,38 @@ Rules:
 @app.post("/analyze-job")
 async def analyze_job(
     resume_profile: str = Form(...),
-    job_title: str = Form(...),
-    company: str = Form(...),
-    job_description: str = Form(...),
+    job_title: str = Form("Job"),
+    company: str = Form(""),
+    job_description: str = Form(""),
 ):
-    ai = require_client()
-
-    prompt = f"""
-You are a cybersecurity job analyst.
-
-Candidate:
-{resume_profile}
-
-Job:
-{job_title}
-Company:
-{company}
-
-Description:
-{clean_text(job_description, 10000)}
-
-Return ONLY JSON:
-
-{{
-    "fit_score": 0,
-    "cybersecurity_relevance": 0,
-
-    "strong_matches": [],
-    "partial_matches": [],
-    "missing_skills": [],
-
-    "required_skills": [],
-    "nice_to_have_skills": [],
-
-    "why_this_job": [],
-    "why_not_this_job": [],
-
-    "skill_gap_priority": [
-        {{
-            "skill": "",
-            "priority": 1,
-            "importance": "High",
-            "reason": "",
-            "recommended_action": ""
-        }}
-    ],
-
-    "recommended_next_skill": {{
-        "skill": "",
-        "reason": "",
-        "career_impact": ""
-    }},
-
-    "application_priority": "",
-    "application_priority_reason": "",
-
-    "career_value": 0,
-    "career_value_reason": "",
-
-    "summary": ""
-}}
-
-Do not invent experience.
-"""
-
-    try:
-        response = ai.responses.create(
-            model="gpt-5-mini",
-            input=prompt,
-            max_output_tokens=1800,
-        )
-
-        return safe_json_load(response.output_text)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Job analysis failed: {str(e)}",
-        )
+    """Run a deterministic job-fit analysis; no generic JSON generation."""
+    title = clean_text(job_title or "Job", 255).strip() or "Job"
+    description = clean_text(job_description, 10000)
+    if not description.strip():
+        description = title
+    analyzed = _job_intelligence(resume_profile, {
+        "title": title,
+        "company": clean_text(company, 255),
+        "description": description,
+    })
+    comparison = compare_skills(resume_profile, f"{title} {description}")
+    matched = analyzed.get("strong_matches", [])
+    gaps = analyzed.get("missing_skills", [])
+    analyzed.update({
+        "required_skills": [_skill_meta(sid).get("name", sid) for sid in comparison.get("required_skills", [])],
+        "nice_to_have_skills": analyzed.get("partial_matches", []),
+        "why_this_job": [f"Your profile provides evidence for {skill}." for skill in matched],
+        "why_not_this_job": [f"The profile does not yet show clear evidence for {skill}." for skill in gaps],
+        "recommended_next_skill": (
+            {"skill": gaps[0], "reason": "It is a required skill not currently detected in the resume profile.",
+             "career_impact": "Improving this skill may increase alignment with similar cybersecurity roles."}
+            if gaps else {"skill": "", "reason": "No missing skills were detected by the current knowledge base.",
+                          "career_impact": "Validate fit against the complete job requirements."}
+        ),
+        "career_value_reason": "Estimated from cybersecurity relevance, fit, and mapped work-role signals.",
+        "summary": f"Detected {len(matched)} strong skill matches and {len(gaps)} skill gaps for {title}.",
+    })
+    return analyzed
 
 
 # =========================================================
@@ -972,65 +1858,42 @@ Do not invent experience.
 @app.post("/skill-gap")
 async def skill_gap(
     resume_profile: str = Form(...),
-    job_title: str = Form(...),
-    job_description: str = Form(...),
+    job_title: str = Form("Target role"),
+    job_description: str = Form(""),
 ):
-    ai = require_client()
-
-    prompt = f"""
-You are a cybersecurity skills-gap analyst.
-
-Candidate:
-{resume_profile}
-
-Target Job:
-{job_title}
-
-Job Description:
-{clean_text(job_description, 10000)}
-
-Return ONLY JSON:
-
-{{
-    "overall_gap_score": 0,
-
-    "strong_matches": [],
-
-    "skill_gaps": [
-        {{
-            "skill": "",
-            "importance": "High",
-            "current_level": "",
-            "required_level": "",
-            "reason": "",
-            "action": ""
-        }}
-    ],
-
-    "top_priority": "",
-
-    "recommended_order": [],
-
-    "summary": ""
-}}
-
-Do not invent candidate experience.
-"""
-
-    try:
-        response = ai.responses.create(
-            model="gpt-5-mini",
-            input=prompt,
-            max_output_tokens=3000,
-        )
-
-        return safe_json_load(response.output_text)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Skill gap analysis failed: {str(e)}",
-        )
+    """Return explainable skill gaps using the same normalized skill graph."""
+    title = clean_text(job_title or "Target role", 255).strip() or "Target role"
+    description = clean_text(job_description, 10000)
+    job_text = f"{title} {description}".strip()
+    comparison = compare_skills(resume_profile, job_text)
+    scoring = calculate_job_fit(resume_profile, job_text, comparison)
+    gaps = comparison.get("skill_gaps", [])
+    matched = comparison.get("strong_matches", [])
+    gap_items = []
+    for sid in gaps:
+        meta = _skill_meta(sid)
+        gap_items.append({
+            "skill": meta.get("name", sid),
+            "skill_id": sid,
+            "importance": "High" if sid in {"siem", "incident_response", "cloud_security", "threat_intelligence"} else "Medium",
+            "current_level": "Evidence not detected in supplied profile",
+            "required_level": "Working knowledge required by the target role",
+            "reason": "The skill appears in the role text but was not detected in the candidate profile.",
+            "action": f"Complete a hands-on exercise and document evidence for {meta.get('name', sid)}.",
+        })
+    gap_score = round(100 - float(comparison.get("fit_score", 0) or 0), 1) if comparison.get("required_skills") else 0
+    return {
+        "target_role": title,
+        "overall_gap_score": gap_score,
+        "fit_score": scoring.get("fit_score", 0),
+        "strong_matches": [_skill_meta(sid).get("name", sid) for sid in matched],
+        "skill_gaps": gap_items,
+        "missing_skills": [item["skill"] for item in gap_items],
+        "top_priority": gap_items[0]["skill"] if gap_items else "No detected skill gaps",
+        "recommended_order": [item["skill"] for item in gap_items],
+        "summary": f"Detected {len(matched)} strong matches and {len(gap_items)} skill gaps against {title}.",
+        "analysis_method": "deterministic cybersecurity skill engine",
+    }
 
 
 # =========================================================
@@ -1145,7 +2008,7 @@ Rules:
 
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=5000,
         )
@@ -1237,7 +2100,7 @@ Rules:
 
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=5000,
         )
@@ -1366,7 +2229,7 @@ Rules:
 
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=6500,
         )
@@ -1443,7 +2306,7 @@ Return ONLY valid JSON in exactly this structure:
 """
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=3000,
         )
@@ -1489,7 +2352,7 @@ Return ONLY JSON:
 
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=2500,
         )
@@ -1507,67 +2370,168 @@ Return ONLY JSON:
 # RESUME TAILORING
 # =========================================================
 
+def _resume_lines(value: str) -> list[str]:
+    """Normalize PDF whitespace without splitting ordinary words into separate paragraphs."""
+    import re
+    raw = [re.sub(r"[ \t]+", " ", row.replace("\u200b", "").replace("\ufeff", "")).strip() for row in value.splitlines()]
+    raw = [row for row in raw if row]
+    # Some PDF extraction engines return one word per line. Rejoin runs of short
+    # fragments; do not join headings, bullets, or ordinary complete lines.
+    normalized = []
+    fragments = []
+    def flush():
+        if fragments:
+            normalized.append(" ".join(fragments))
+            fragments.clear()
+    for line in raw:
+        is_fragment = len(line) <= 20 and len(line.split()) <= 2 and not line.endswith((':', '.', ';', '|')) and not line.startswith(('•', '-', '*'))
+        if is_fragment:
+            fragments.append(line)
+            if len(fragments) >= 12: flush()
+        else:
+            flush()
+            normalized.append(line)
+    flush()
+    return normalized
+
+
+def _resume_sections(lines: list[str]) -> list[tuple[str, list[str]]]:
+    headings = {
+        'EDUCATION', 'TECHNICAL SKILLS & CERTIFICATIONS', 'PROFESSIONAL EXPERIENCE',
+        'RESEARCH EXPERIENCE', 'EXTRACURRICULAR ACTIVITIES', 'PROJECTS',
+        'CERTIFICATIONS', 'SKILLS', 'PROFESSIONAL SUMMARY', 'SUMMARY',
+        'WORK EXPERIENCE', 'LEADERSHIP EXPERIENCE', 'VOLUNTEER EXPERIENCE',
+    }
+    result = [('CONTACT', [])]
+    for line in lines:
+        if line.upper().strip(': ') in headings:
+            result.append((line.upper().strip(': '), []))
+        else:
+            result[-1][1].append(line)
+    return result
+
+
+@app.post("/tailor-resume/pdf")
+async def tailor_resume_pdf(
+    original_resume: str = Form(...),
+    tailored_resume: str = Form(...),
+    job_title: str = Form(...),
+    company: str = Form(""),
+):
+    """Compact annotated resume, preserving original section order and evidence."""
+    from io import BytesIO
+    from html import escape
+    from fastapi.responses import Response
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, KeepTogether, HRFlowable
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+
+    original_lines = _resume_lines(original_resume)
+    tailored_lines = _resume_lines(tailored_resume)
+    if not original_lines:
+        raise HTTPException(status_code=400, detail="Resume text is empty. Upload the original PDF again.")
+    # Never render scrambled/word-by-word tailored text as a new resume.
+    original_sections = _resume_sections(original_lines)
+    tailored_sections = _resume_sections(tailored_lines)
+    summary = next((lines[0] for name, lines in tailored_sections if name == 'PROFESSIONAL SUMMARY' and lines), '')
+    original_content = ' '.join(original_lines).casefold()
+    if summary and len(summary) > 320: summary = ''
+    # The only added section is a short evidence-grounded summary. Original
+    # experience, dates, certifications and section order remain unchanged.
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, leftMargin=48, rightMargin=48, topMargin=42, bottomMargin=42)
+    styles = getSampleStyleSheet()
+    body = ParagraphStyle('v14Body', parent=styles['BodyText'], fontName='Helvetica', fontSize=9.2, leading=13.2, spaceAfter=3, splitLongWords=False)
+    head = ParagraphStyle('v14Head', parent=body, fontName='Helvetica-Bold', fontSize=10, leading=14, spaceBefore=11, spaceAfter=5, textColor=colors.HexColor('#087F70'))
+    title = ParagraphStyle('v14Title', parent=body, fontName='Helvetica-Bold', fontSize=13.5, leading=18, spaceAfter=5)
+    comment = ParagraphStyle('v14Comment', parent=body, fontSize=8, leading=11, textColor=colors.HexColor('#80520A'), leftIndent=8, spaceAfter=8)
+    meta = ParagraphStyle('v14Meta', parent=body, fontSize=8.3, leading=11, textColor=colors.HexColor('#555E65'), spaceAfter=7)
+    story = [Paragraph('Resume review', title), Paragraph('Target role: ' + escape(job_title) + (' · ' + escape(company) if company else ''), meta), Paragraph('Yellow highlights indicate suggested emphasis. The original resume details are preserved; review suggestions before applying.', meta), HRFlowable(width='100%', thickness=.7, color=colors.HexColor('#D6E7E1')), Spacer(1, 8)]
+    if summary:
+        story.append(Paragraph('SUGGESTED PROFESSIONAL SUMMARY', head))
+        story.append(Paragraph('<font backColor="#FFF1A8">' + escape(summary) + '</font>', body))
+        story.append(Paragraph('COMMENT: This summary uses skills detected in your resume to make the target role clearer. Check every claim before using it.', comment))
+    highlighted = 0
+    for section, lines in original_sections:
+        if section != 'CONTACT': story.append(Paragraph(escape(section), head))
+        for line in lines:
+            # Keep the original lines intact; highlight only a few existing
+            # role-relevant examples, rather than annotating every word.
+            low = line.lower()
+            relevant = highlighted < 4 and len(line) > 55 and any(k in low for k in ('security', 'threat', 'incident', 'network', 'wireshark', 'python', 'mitre')) and section != 'CONTACT'
+            content = escape(line).replace('•', '&#8226;')
+            if relevant:
+                story.append(Paragraph('<font backColor="#FFF1A8">' + content + '</font>', body))
+                story.append(Paragraph('COMMENT: This existing experience is relevant to the selected security role. Consider making its outcome or evidence more specific, if accurate.', comment))
+                highlighted += 1
+            else:
+                story.append(Paragraph(content, body))
+    doc.build(story)
+    return Response(content=buf.getvalue(), media_type='application/pdf', headers={'Content-Disposition':'inline; filename="tailored-resume-review.pdf"'})
+
+
 @app.post("/tailor-resume")
 async def tailor_resume(
     resume_text: str = Form(...),
     job_title: str = Form(...),
-    company: str = Form(...),
+    company: str = Form(""),
     job_description: str = Form(...),
 ):
-    ai = require_client()
+    """Preserve source resume; suggest a short evidence-grounded summary only."""
+    resume = clean_text(resume_text, 15000)
+    job = clean_text(job_description, 10000)
+    lines = _resume_lines(resume)
+    if not lines:
+        raise HTTPException(status_code=400, detail='Please upload a readable resume first.')
+    candidate_skills = set(extract_skills(resume))
+    job_skills = set(extract_skills(job + ' ' + job_title))
+    matched = sorted(job_skills & candidate_skills)
+    missing = sorted(job_skills - candidate_skills)
+    skill_names = [_skill_meta(x).get('name', x) for x in matched[:4]]
+    summary = (f"Candidate for {job_title} with resume-supported skills in " + ', '.join(skill_names) + '.') if skill_names else ''
+    # Never reorder individual words, bullet points, dates, or sections.
+    tailored = ('PROFESSIONAL SUMMARY\n' + summary + '\n\n' if summary else '') + '\n'.join(lines)
+    return {
+        'summary': summary,
+        'tailored_resume': tailored,
+        'changes_made': ['Suggested a summary based on existing skills; retained the original resume structure.'] if summary else ['Retained original resume. No verified role-specific skills to add.'],
+        'keywords_added': skill_names,
+        'keywords_not_added_because_missing': [_skill_meta(x).get('name', x) for x in missing],
+        'evidence_policy': 'No new achievements, credentials, dates, or experience were invented.',
+        'match_score': round(len(matched)/max(1,len(job_skills))*100,1),
+    }
 
-    prompt = f"""
-You are a professional cybersecurity resume editor.
+@app.get("/intelligence/calibration")
+async def intelligence_calibration():
+    payload=_career_intelligence_payload()
+    return {
+        'engine':'CyberPath Fit Calibration v2.0',
+        'confidence':payload['confidence'],
+        'sample_size':payload['sample_size'],
+        'weights':{'base_skill_match':55,'cybersecurity_relevance':20,'evidence':15,'career_signal':10},
+        'adaptive_adjustment':'Outcome-aware skill weighting is blended into the base fit score after enough skill signals exist.',
+        'top_skill_signals':payload['top_skill_signals'],
+        'recommendation':payload['recommendation'],
+        'limitations':payload['limitations'],
+    }
 
-Original Resume:
-{clean_text(resume_text, 15000)}
-
-Target Job:
-{job_title}
-
-Company:
-{company}
-
-Job Description:
-{clean_text(job_description, 10000)}
-
-Rewrite the resume to better match the job.
-
-IMPORTANT:
-
-- Never invent experience.
-- Never invent projects.
-- Never invent certifications.
-- Never invent technologies.
-- Never change factual dates.
-- Only improve wording, ordering, and emphasis.
-- Use cybersecurity-relevant terminology when supported by the original resume.
-
-Return ONLY JSON:
-
-{{
-    "summary": "",
-    "tailored_resume": "",
-    "changes_made": [],
-    "keywords_added": [],
-    "keywords_not_added_because_missing": []
-}}
-"""
-
+@app.get("/intelligence/job-quality")
+async def intelligence_job_quality():
+    if not SessionLocal:
+        return {'quality_score':0,'jobs_tracked':0}
+    db=SessionLocal()
     try:
-        response = ai.responses.create(
-            model="gpt-5-mini",
-            input=prompt,
-            max_output_tokens=4000,
-        )
+        rows=db.query(Application).all()
+        quality=_job_quality([{'title':r.job_title,'company':r.company,'location':r.location,'description':r.notes or ''} for r in rows])
+        quality['jobs_tracked']=len(rows)
+        return quality
+    finally:
+        db.close()
 
-        return safe_json_load(response.output_text)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Resume tailoring failed: {str(e)}",
-        )
+@app.get("/intelligence/career")
+async def intelligence_career():
+    return _career_intelligence_payload()
 
 
 # =========================================================
@@ -1834,7 +2798,7 @@ Return ONLY valid JSON using exactly this structure:
 
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=6500,
         )
@@ -1936,7 +2900,7 @@ Return exactly:
 
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=5000,
         )
@@ -2167,86 +3131,35 @@ async def get_application_package(package_id: int):
 # =========================================================
 
 @app.post("/applications")
-async def create_application(
-    job_title: str = Form(...),
-    company: str = Form(""),
-    location: str = Form(""),
-    url: str = Form(""),
-    fit_score: float = Form(0),
-    cybersecurity_relevance: float = Form(0),
-    career_value: float = Form(0),
-    priority: str = Form("Medium"),
-    deadline: str = Form(""),
-    notes: str = Form(""),
-):
+async def create_application(request: Request):
     if not SessionLocal:
-        raise HTTPException(
-            status_code=500,
-            detail="Database is not configured.",
-        )
-
-    db = SessionLocal()
-
+        raise HTTPException(status_code=500, detail="Database is not configured.")
+    content_type=request.headers.get('content-type','')
+    data={}
+    if 'application/json' in content_type:
+        data=await request.json()
+    else:
+        form=await request.form()
+        data=dict(form)
+    def val(key, default=''):
+        return data.get(key, default)
+    db=SessionLocal()
     try:
-        existing = (
-            db.query(Application)
-            .filter(
-                Application.job_title == job_title,
-                Application.company == company,
-            )
-            .first()
-        )
-
+        job_title=str(val('job_title','Untitled Job'))
+        company=str(val('company',''))
+        existing=db.query(Application).filter(Application.job_title==job_title,Application.company==company).first()
         if existing:
-            return {
-                "message": "Application already exists.",
-                "application": {
-                    "id": existing.id,
-                    "job_title": existing.job_title,
-                    "company": existing.company,
-                },
-            }
-
-        application = Application(
-            job_title=job_title,
-            company=company,
-            location=location,
-            url=url,
-            fit_score=fit_score,
-            cybersecurity_relevance=cybersecurity_relevance,
-            career_value=career_value,
-            priority=priority,
-            deadline=deadline,
-            notes=notes,
+            return {'message':'Application already exists.','application':{'id':existing.id,'job_title':existing.job_title,'company':existing.company}}
+        application=Application(
+            job_title=job_title, company=company, location=str(val('location','')), url=str(val('url','')),
+            fit_score=float(val('fit_score',0) or 0), cybersecurity_relevance=float(val('cybersecurity_relevance',0) or 0),
+            career_value=float(val('career_value',0) or 0), priority=str(val('priority','Medium')), deadline=str(val('deadline','')), notes=str(val('notes','')),
+            required_skill_ids=json.dumps(_json_list(val('required_skill_ids','[]'))),
+            matched_skill_ids=json.dumps(_json_list(val('matched_skill_ids','[]'))),
+            missing_skill_ids=json.dumps(_json_list(val('missing_skill_ids','[]'))),
         )
-
-        db.add(application)
-        db.commit()
-        db.refresh(application)
-
-        return {
-            "message": "Application saved.",
-            "application": {
-                "id": application.id,
-                "job_title": application.job_title,
-                "company": application.company,
-                "location": application.location,
-                "url": application.url,
-                "fit_score": application.fit_score,
-                "cybersecurity_relevance":
-                    application.cybersecurity_relevance,
-                "career_value": application.career_value,
-                "priority": application.priority,
-                "status": application.status,
-                "deadline": application.deadline,
-                "notes": application.notes,
-                "created_at":
-                    application.created_at.isoformat()
-                    if application.created_at
-                    else None,
-            },
-        }
-
+        db.add(application); db.commit(); db.refresh(application)
+        return {'message':'Application saved.','application':{'id':application.id,'job_title':application.job_title,'company':application.company,'location':application.location,'url':application.url,'fit_score':application.fit_score,'cybersecurity_relevance':application.cybersecurity_relevance,'career_value':application.career_value,'priority':application.priority,'status':application.status,'deadline':application.deadline,'notes':application.notes,'created_at':application.created_at.isoformat() if application.created_at else None}}
     finally:
         db.close()
 
@@ -2330,6 +3243,8 @@ async def update_application(
 
         if status is not None:
             application.status = status
+            snapshot = _json_list(application.matched_skill_ids) + _json_list(application.missing_skill_ids)
+            persist_outcome(str(status).lower(), snapshot)
 
         if priority is not None:
             application.priority = priority
@@ -2530,7 +3445,7 @@ Return exactly this structure:
 
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=5000,
         )
@@ -2642,7 +3557,7 @@ Return exactly this structure:
 
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=6000,
         )
@@ -2715,7 +3630,7 @@ Return ONLY valid JSON in exactly this structure:
 }}
 """
     try:
-        response = ai.responses.create(model="gpt-5-mini", input=prompt, max_output_tokens=5000)
+        response = ai.responses.create(model="cyberpath-local", input=prompt, max_output_tokens=5000)
         return safe_json_load(response.output_text)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Career evidence audit failed: {str(e)}")
@@ -2782,7 +3697,7 @@ Return ONLY valid JSON in exactly this structure:
 }}
 """
     try:
-        response = ai.responses.create(model="gpt-5-mini", input=prompt, max_output_tokens=6000)
+        response = ai.responses.create(model="cyberpath-local", input=prompt, max_output_tokens=6000)
         return safe_json_load(response.output_text)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cybersecurity portfolio builder failed: {str(e)}")
@@ -2862,7 +3777,7 @@ Return ONLY valid JSON using exactly this structure:
 Return valid JSON only.
 """
     try:
-        response = ai.responses.create(model="gpt-5-mini", input=prompt, max_output_tokens=6500)
+        response = ai.responses.create(model="cyberpath-local", input=prompt, max_output_tokens=6500)
         return safe_json_load(response.output_text)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Portfolio quality audit failed: {str(e)}")
@@ -2955,7 +3870,7 @@ Return ONLY valid JSON in exactly this structure:
 Return valid JSON only.
 """
     try:
-        response = ai.responses.create(model="gpt-5-mini", input=prompt, max_output_tokens=5000)
+        response = ai.responses.create(model="cyberpath-local", input=prompt, max_output_tokens=5000)
         return safe_json_load(response.output_text)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Application readiness gate failed: {str(e)}")
@@ -3105,7 +4020,7 @@ Return valid JSON only.
 
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=6000,
         )
@@ -3187,7 +4102,7 @@ Return ONLY valid JSON in exactly this structure:
 }}
 """
     try:
-        response = ai.responses.create(model="gpt-5-mini", input=prompt, max_output_tokens=5000)
+        response = ai.responses.create(model="cyberpath-local", input=prompt, max_output_tokens=5000)
         return safe_json_load(response.output_text)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Application follow-up copilot failed: {str(e)}")
@@ -3260,7 +4175,7 @@ Return ONLY valid JSON in exactly this structure:
 }}
 """
     try:
-        response = ai.responses.create(model="gpt-5-mini", input=prompt, max_output_tokens=6000)
+        response = ai.responses.create(model="cyberpath-local", input=prompt, max_output_tokens=6000)
         return safe_json_load(response.output_text)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Career outcome intelligence failed: {str(e)}")
@@ -3280,7 +4195,7 @@ async def mock_interview_start(
 
     prompt = f"""
 You are an experienced cybersecurity interviewer running a realistic mock interview.
-Create a 5-question interview for a college student applying to the target job.
+Create EXACTLY 10 interview questions for a candidate applying to the target job: 5 job-specific questions and 5 resume-specific questions.
 
 Target Role:
 {target_role}
@@ -3297,12 +4212,14 @@ Interview Preparation Plan:
 Rules:
 - Use the actual job requirements and candidate profile.
 - Do not invent candidate experience.
-- Mix technical, cybersecurity scenario, resume-based, and behavioral questions.
+- Questions 1–5 must be job-specific (technical, cybersecurity scenarios, role requirements, and behavioral situations related to the posting).
+- Questions 6–10 must be resume-specific and refer to genuine skills, projects, experience, or education present in the candidate profile.
+- Set the category field to "Job-specific" for questions 1–5 and "Resume-specific" for questions 6–10.
 - Start at realistic internship/entry-level difficulty.
 - Questions should require the candidate to explain reasoning, not just definitions.
 - Make follow-up questions possible from the candidate's answer.
 - Do not provide the answers.
-- The fifth question should be a strong closing question.
+- Return exactly 10 questions, numbered 1 through 10, with no duplicates.
 
 Return ONLY valid JSON:
 {{
@@ -3320,8 +4237,42 @@ Return ONLY valid JSON:
 }}
 """
     try:
-        response = ai.responses.create(model="gpt-5-mini", input=prompt, max_output_tokens=3000)
-        return safe_json_load(response.output_text)
+        response = ai.responses.create(model="cyberpath-local", input=prompt, max_output_tokens=4500)
+        parsed = safe_json_load(response.output_text)
+        parsed_questions = parsed.get("questions", []) if isinstance(parsed, dict) else []
+        job_questions = [q for q in parsed_questions if isinstance(q, dict) and q.get("category") == "Job-specific" and q.get("question")]
+        resume_questions = [q for q in parsed_questions if isinstance(q, dict) and q.get("category") == "Resume-specific" and q.get("question")]
+        # Some local models ignore JSON cardinality/category instructions. Fill missing
+        # questions with transparent, role-aware prompts instead of showing just one.
+        job_fallback = [
+            f"For this {target_role} position, how would you investigate a suspicious login alert?",
+            f"Which security controls would you prioritize for the systems described in this {target_role} posting, and why?",
+            "Walk through your incident triage process when several alerts arrive at once.",
+            "How would you communicate a security finding and remediation steps to a nontechnical teammate?",
+            "Describe how you would validate that a reported vulnerability is exploitable and recommend mitigation.",
+        ]
+        profile_lines = [line.strip() for line in clean_text(resume_profile, 5000).splitlines() if len(line.strip()) > 12]
+        evidence = profile_lines[:5]
+        resume_fallback = [
+            f"Your resume mentions {evidence[i][:90] if i < len(evidence) else 'your skills or projects'}. What exactly did you do, and what evidence shows the result?"
+            for i in range(5)
+        ]
+        def finish(group, fallback, category):
+            chosen = []
+            seen = set()
+            for q in group:
+                key = q['question'].strip().lower()
+                if key not in seen:
+                    seen.add(key); chosen.append(q)
+                if len(chosen) == 5: break
+            for question in fallback:
+                if len(chosen) == 5: break
+                if question.lower() not in seen:
+                    chosen.append({"question": question, "category": category, "difficulty": "Entry-level", "what_it_tests": "Role-relevant reasoning and verifiable evidence"})
+            return chosen
+        questions = finish(job_questions, job_fallback, "Job-specific") + finish(resume_questions, resume_fallback, "Resume-specific")
+        for i, question in enumerate(questions): question['number'] = i + 1
+        return {"session_title": parsed.get("session_title", "Job interview practice") if isinstance(parsed,dict) else "Job interview practice", "questions": questions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Mock interview start failed: {str(e)}")
 
@@ -3393,7 +4344,7 @@ Return ONLY valid JSON:
 }}
 """
     try:
-        response = ai.responses.create(model="gpt-5-mini", input=prompt, max_output_tokens=3000)
+        response = ai.responses.create(model="cyberpath-local", input=prompt, max_output_tokens=3000)
         return safe_json_load(response.output_text)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Mock interview evaluation failed: {str(e)}")
@@ -3530,7 +4481,7 @@ Return valid JSON only.
 
     try:
         response = ai.responses.create(
-            model="gpt-5-mini",
+            model="cyberpath-local",
             input=prompt,
             max_output_tokens=6500,
         )
@@ -3773,3 +4724,55 @@ async def dashboard():
 
     finally:
         db.close()
+# =========================================================
+# STEP 49 — CYBERSECURITY SKILL GRAPH
+# =========================================================
+
+# =========================================================
+# STEP 49 — CYBERSECURITY SKILL GRAPH
+# =========================================================
+
+@app.post("/intelligence/skill-graph")
+async def intelligence_skill_graph(
+    resume_text: str = Form(""),
+    job_description: str = Form(""),
+    target_role: str = Form(""),
+):
+    result = compare_skills(resume_text, job_description)
+    record_skills(result["candidate_skills"])
+    record_gaps(result["skill_gaps"])
+    return {
+        **result,
+        "target_role": target_role,
+        "graph": {skill: graph_neighbors([skill]) for skill in result.get("candidate_skills", [])},
+        "explanation": explain(),
+    }
+
+
+@app.post("/intelligence/evidence")
+async def intelligence_evidence(
+    resume_text: str = Form(""),
+):
+    skills = extract_skills(resume_text)
+    evidence = skill_evidence(resume_text)
+    return {
+        "skills": skills,
+        "evidence": evidence,
+        "evidence_score": round(
+            sum(x["evidence_strength"] for x in evidence.values()) / len(evidence), 1
+        ) if evidence else 0,
+    }
+
+
+@app.post("/intelligence/record-outcome")
+async def intelligence_record_outcome(outcome: str = Form(...)):
+    normalized = clean_text(outcome, 80).strip().lower()
+    if not normalized:
+        raise HTTPException(status_code=422, detail="Outcome is required.")
+    record_outcome(normalized)
+    persist_outcome(normalized)
+    return {
+        "message": "Aggregate outcome signal recorded.",
+        "outcome": normalized,
+        "insights": insights(),
+    }

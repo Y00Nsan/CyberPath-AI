@@ -1,6 +1,9 @@
 fastapi
 uvicorn
-python-dotenv
 python-multipart
+pydantic
+httpx
+python-dotenv
 pypdf
-openai
+sqlalchemy
+reportlab>=4.0

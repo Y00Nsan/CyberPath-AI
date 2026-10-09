@@ -1,28 +1,110 @@
-# CyberPath AI
+# CyberPath AI — Step 43
 
-CyberPath AI is a cybersecurity-focused career agent that connects job search, skill-gap analysis, learning, portfolio evidence, application readiness, follow-up, interview preparation, and outcome analysis in one workflow.
+CyberPath AI is a cybersecurity-focused career intelligence platform that connects resume analysis, cybersecurity job intelligence, skill-gap analysis, learning, portfolio evidence, application readiness, interview preparation, and career outcomes.
 
-## Core workflow
+## Step 43 changes
 
-Resume/Profile → Job Market → Skill Gap → Learning → 90-Day Plan → Weekly Sprint → Career Evidence → Portfolio Builder → Portfolio Audit → Application Readiness → Application → Follow-up → Interview → Outcome Intelligence
+Step 43 is built directly from the Step 42 release. The existing career workflow and API routes are preserved.
+
+### 1. Cybersecurity Intelligence Engine foundation
+
+A deterministic, cybersecurity-specific intelligence layer was added under:
+
+```text
+backend/app/intelligence/
+├── __init__.py
+├── knowledge_base.py
+├── skill_engine.py
+├── scoring_engine.py
+└── adaptive_engine.py
+```
+
+The engine currently provides:
+
+- cybersecurity skill extraction
+- aliases and terminology normalization
+- candidate skill vs. job skill comparison
+- strong / partial / missing skill classification
+- cybersecurity relevance scoring
+- explainable job-fit scoring
+- NICE-aligned category labels
+- bounded aggregate learning signals
+
+The adaptive layer intentionally stores **aggregate skill statistics rather than raw resumes or job descriptions**, preventing unbounded memory growth.
+
+New endpoints:
+
+```text
+POST /intelligence/test
+POST /intelligence/feedback
+GET  /intelligence/insights
+```
+
+This is a foundation, not a claim that a deterministic rules engine is equivalent to a general-purpose LLM. It is designed specifically for cybersecurity career intelligence and can be expanded with more skills, relationships, evidence rules, and outcome signals.
+
+### 2. UI redesign
+
+The existing Step 42 UI was retained functionally but reorganized visually around a simpler Command Center:
+
+```text
+Resume
+   ↓
+Cybersecurity Profile
+   ↓
+Job Market
+   ↓
+Skill / Cyber Relevance
+   ↓
+Learning + Proof
+   ↓
+Applications
+   ↓
+Interviews
+   ↓
+Career Outcomes
+```
+
+The Command Center now includes:
+
+- animated cybersecurity hero
+- immediate quick actions
+- Fit / Cybersecurity / Career Value visual bars
+- Saved → Applied → Interview → Offer funnel
+- Cybersecurity Intelligence Engine card
+- stronger visual hierarchy
+- responsive/mobile behavior
+- hover and ambient animations
+- existing detailed tools remain available below the main dashboard
+
+## Existing Step 42 workflow preserved
+
+Resume/Profile → Job Market → Skill Gap → Learning → 90-Day Plan → Weekly Sprint → Career Evidence → Portfolio Builder → Portfolio Audit → Application Readiness → Application Pipeline → Follow-up → Interview → Outcome Intelligence
 
 ## Stack
 
 - Frontend: Next.js / React / TypeScript
 - Backend: FastAPI / Python
-- AI: OpenAI API
-- Job Search: Adzuna API
-- Database: PostgreSQL
+- Existing AI layer: OpenAI API
+- Existing job search layer: Adzuna API
+- Existing database layer: SQLAlchemy / PostgreSQL
 - Resume parsing: pypdf
+- New cybersecurity intelligence layer: Python + built-in SQLite aggregate statistics
+
+Step 43 does **not** remove the existing OpenAI/Adzuna/PostgreSQL implementation yet. The Intelligence Engine is intentionally introduced as a safe foundation before a later controlled migration.
 
 ## Project structure
 
 ```text
 cyberpath-ai/
 ├── backend/
-│   ├── app/
-│   │   └── main.py
-│   └── .env
+│   └── app/
+│       ├── main.py
+│       └── intelligence/
+│           ├── __init__.py
+│           ├── knowledge_base.py
+│           ├── skill_engine.py
+│           ├── scoring_engine.py
+│           └── adaptive_engine.py
 └── frontend/
     └── src/app/
         ├── page.tsx
@@ -31,7 +113,7 @@ cyberpath-ai/
 
 ## Environment variables
 
-Create `backend/.env`:
+The existing Step 42 backend still expects the server-side environment variables configured in `backend/.env`:
 
 ```env
 OPENAI_API_KEY=your_openai_api_key
@@ -42,66 +124,41 @@ DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@localhost:5432/cyberpath
 
 Never commit `.env` or API keys to GitHub.
 
-## Backend setup
+## Backend
 
 ```bash
 cd backend
-python -m venv venv
 venv\Scripts\activate
-pip install fastapi uvicorn python-dotenv python-multipart pypdf openai httpx sqlalchemy psycopg2-binary psycopg[binary]
 uvicorn app.main:app --reload
 ```
 
-Backend runs at `http://127.0.0.1:8000`.
+Backend: `http://127.0.0.1:8000`
 
-## Frontend setup
+## Frontend
+
+In a second terminal:
 
 ```bash
 cd frontend
-npm install
 npm run dev
 ```
 
-Frontend runs at `http://localhost:3000`.
+Frontend: `http://localhost:3000`
 
-## Database
+## Intelligence Engine quick test
 
-Create a PostgreSQL database named `cyberpath` and set `DATABASE_URL` in `backend/.env`.
+```bash
+curl -X POST http://127.0.0.1:8000/intelligence/test ^
+  -H "Content-Type: application/json" ^
+  -d "{\"candidate_text\":\"AWS IAM Python Wireshark OSINT MITRE ATT&CK\",\"job_text\":\"AWS IAM SIEM Python Wireshark incident response MITRE ATT&CK\"}"
+```
 
-The application uses SQLAlchemy and creates required tables through the application's database initialization.
+## QA
 
-## Security notes
-
-- Keep `backend/.env` out of source control.
-- Do not place API keys in frontend code.
-- Do not commit uploaded resumes or private application data.
-- Use environment variables for production secrets.
-- Replace local development credentials before deployment.
-
-## Final QA
-
-Backend syntax check:
+Backend syntax:
 
 ```bash
 python -m py_compile backend/app/main.py
 ```
 
-The final Step 42 build was checked for Python syntax, route preservation, core career workflow sections, and accidental hard-coded secrets.
-
-## GitHub checklist
-
-Before pushing:
-
-- [ ] Confirm `.env` is ignored
-- [ ] Remove real API keys from any tracked files
-- [ ] Remove private resumes/test data
-- [ ] Run backend syntax check
-- [ ] Run frontend production build
-- [ ] Test database connection
-- [ ] Test job search with real credentials
-- [ ] Test resume upload
-- [ ] Test application tracker
-
-## Production deployment
-
-For a production deployment, configure environment variables and a hosted PostgreSQL database, then deploy the FastAPI backend and Next.js frontend separately or behind the same domain. Do not use local development secrets in production.
+The Step 43 release was checked to preserve the original Step 42 route set and add the three Intelligence Engine routes.
