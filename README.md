@@ -1,165 +1,478 @@
-# CyberPath AI — Step 43
+##### \# CyberPath AI
 
-CyberPath AI is a cybersecurity-focused career intelligence platform that connects resume analysis, cybersecurity job intelligence, skill-gap analysis, learning, portfolio evidence, application readiness, interview preparation, and career outcomes.
+##### 
 
-## Step 43 changes
+##### \*\*AI-Powered Cybersecurity Career Intelligence Platform\*\*
 
-Step 43 is built directly from the Step 42 release. The existing career workflow and API routes are preserved.
+##### 
 
-### 1\. Cybersecurity Intelligence Engine foundation
+##### CyberPath AI is a full-stack web application designed to help students and early-career professionals discover cybersecurity opportunities, evaluate their qualifications, improve their resumes, and prepare for job interviews.
 
-A deterministic, cybersecurity-specific intelligence layer was added under:
+##### 
 
-```text
-backend/app/intelligence/
-├── \_\_init\_\_.py
-├── knowledge\_base.py
-├── skill\_engine.py
-├── scoring\_engine.py
-└── adaptive\_engine.py
-```
+##### The platform connects resume analysis, cybersecurity job discovery, explainable job matching, application tracking, and AI-assisted interview preparation into one workflow.
 
-The engine currently provides:
+##### 
 
-* cybersecurity skill extraction
-* aliases and terminology normalization
-* candidate skill vs. job skill comparison
-* strong / partial / missing skill classification
-* cybersecurity relevance scoring
-* explainable job-fit scoring
-* NICE-aligned category labels
-* bounded aggregate learning signals
+##### \## Key Features
 
-The adaptive layer intentionally stores **aggregate skill statistics rather than raw resumes or job descriptions**, preventing unbounded memory growth.
+##### 
 
-New endpoints:
+##### \### 1. Resume Analysis
 
-```text
-POST /intelligence/test
-POST /intelligence/feedback
-GET  /intelligence/insights
-```
+##### \- Upload a PDF resume.
 
-This is a foundation, not a claim that a deterministic rules engine is equivalent to a general-purpose LLM. It is designed specifically for cybersecurity career intelligence and can be expanded with more skills, relationships, evidence rules, and outcome signals.
+##### \- Extract professional experience, education, technical skills, and certifications.
 
-### 2\. UI redesign
+##### \- Generate a structured candidate profile for career preparation.
 
-The existing Step 42 UI was retained functionally but reorganized visually around a simpler Command Center:
+##### 
 
-```text
-Resume
-   ↓
-Cybersecurity Profile
-   ↓
-Job Market
-   ↓
-Skill / Cyber Relevance
-   ↓
-Learning + Proof
-   ↓
-Applications
-   ↓
-Interviews
-   ↓
-Career Outcomes
-```
+##### \### 2. Cybersecurity Job Discovery
 
-The Command Center now includes:
+##### \- Search cybersecurity-related job opportunities.
 
-* animated cybersecurity hero
-* immediate quick actions
-* Fit / Cybersecurity / Career Value visual bars
-* Saved → Applied → Interview → Offer funnel
-* Cybersecurity Intelligence Engine card
-* stronger visual hierarchy
-* responsive/mobile behavior
-* hover and ambient animations
-* existing detailed tools remain available below the main dashboard
+##### \- Filter results by job type and company.
 
-## Existing Step 42 workflow preserved
+##### \- Review job descriptions and available application information.
 
-Resume/Profile → Job Market → Skill Gap → Learning → 90-Day Plan → Weekly Sprint → Career Evidence → Portfolio Builder → Portfolio Audit → Application Readiness → Application Pipeline → Follow-up → Interview → Outcome Intelligence
+##### \- Access original job postings.
 
-## Stack
+##### 
 
-* Frontend: Next.js / React / TypeScript
-* Backend: FastAPI / Python
-* Existing AI layer: OpenAI API
-* Existing job search layer: Adzuna API
-* Existing database layer: SQLAlchemy / PostgreSQL
-* Resume parsing: pypdf
-* New cybersecurity intelligence layer: Python + built-in SQLite aggregate statistics
+##### \### 3. Job Fit \& Cybersecurity Intelligence
 
-Step 43 does **not** remove the existing OpenAI/Adzuna/PostgreSQL implementation yet. The Intelligence Engine is intentionally introduced as a safe foundation before a later controlled migration.
+##### \- Compare candidate qualifications with job requirements.
 
-## Project structure
+##### \- Identify strong, partial, and missing skills.
 
-```text
-cyberpath-ai/
-├── backend/
-│   └── app/
-│       ├── main.py
-│       └── intelligence/
-│           ├── \_\_init\_\_.py
-│           ├── knowledge\_base.py
-│           ├── skill\_engine.py
-│           ├── scoring\_engine.py
-│           └── adaptive\_engine.py
-└── frontend/
-    └── src/app/
-        ├── page.tsx
-        └── globals.css
-```
+##### \- Normalize cybersecurity terminology and skill aliases.
 
-## Environment variables
+##### \- Generate explainable job-fit and cybersecurity relevance scores.
 
-The existing Step 42 backend still expects the server-side environment variables configured in `backend/.env`:
+##### \- Use cybersecurity-specific skill knowledge and NICE-aligned category labels.
 
-```env
-OPENAI\_API\_KEY=your\_openai\_api\_key
-ADZUNA\_APP\_ID=your\_adzuna\_app\_id
-ADZUNA\_APP\_KEY=your\_adzuna\_app\_key
-DATABASE\_URL=postgresql://postgres:YOUR\_PASSWORD@localhost:5432/cyberpath
-```
+##### 
 
-Never commit `.env` or API keys to GitHub.
+##### \### 4. AI Resume Tailoring
 
-## Backend
+##### \- Select a job to prepare for.
 
-```bash
-cd backend
-venv\\Scripts\\activate
-uvicorn app.main:app --reload
-```
+##### \- Generate a job-focused version of the candidate's resume.
 
-Backend: `http://127.0.0.1:8000`
+##### \- Review a PDF with highlighted changes and explanatory comments.
 
-## Frontend
+##### \- Preserve existing experience rather than inventing qualifications.
 
-In a second terminal:
+##### 
 
-```bash
-cd frontend
-npm run dev
-```
+##### \### 5. AI Mock Interviews
 
-Frontend: `http://localhost:3000`
+##### \- Practice 10 questions for a selected job:
 
-## Intelligence Engine quick test
+##### &#x20; - 5 job-specific questions.
 
-```bash
-curl -X POST http://127.0.0.1:8000/intelligence/test ^
-  -H "Content-Type: application/json" ^
-  -d "{\\"candidate\_text\\":\\"AWS IAM Python Wireshark OSINT MITRE ATT\&CK\\",\\"job\_text\\":\\"AWS IAM SIEM Python Wireshark incident response MITRE ATT\&CK\\"}"
-```
+##### &#x20; - 5 resume-specific questions.
 
-## QA
+##### \- Submit answers and receive evaluation feedback.
 
-Backend syntax:
+##### \- Review suggested answer improvements.
 
-```bash
-python -m py\_compile backend/app/main.py
-```
+##### \- Navigate between interview questions.
 
-The Step 43 release was checked to preserve the original Step 42 route set and add the three Intelligence Engine routes.
+##### 
+
+##### \### 6. Application Tracking
+
+##### \- Save job opportunities.
+
+##### \- Organize applications.
+
+##### \- Return to original job postings.
+
+##### \- Connect job discovery with application preparation.
+
+##### 
+
+##### \## Cybersecurity Intelligence Engine
+
+##### 
+
+##### CyberPath AI includes a deterministic cybersecurity intelligence layer implemented in Python.
+
+##### 
+
+##### Its capabilities include:
+
+##### 
+
+##### \- Cybersecurity skill extraction.
+
+##### \- Terminology and alias normalization.
+
+##### \- Candidate-to-job skill comparison.
+
+##### \- Strong, partial, and missing skill classification.
+
+##### \- Explainable job-fit scoring.
+
+##### \- Cybersecurity relevance scoring.
+
+##### \- NICE-aligned category labels.
+
+##### \- Bounded aggregate learning signals.
+
+##### 
+
+##### The intelligence engine uses domain-specific rules and structured knowledge. It is not presented as a replacement for a general-purpose large language model.
+
+##### 
+
+##### \### Intelligence API Endpoints
+
+##### 
+
+##### ```http
+
+##### POST /intelligence/test
+
+##### POST /intelligence/feedback
+
+##### GET /intelligence/insights
+
+##### ```
+
+##### 
+
+##### \## Technology Stack
+
+##### 
+
+##### | Layer | Technologies |
+
+##### |---|---|
+
+##### | Frontend | Next.js, React, TypeScript, CSS |
+
+##### | Backend | FastAPI, Python |
+
+##### | AI Integration | OpenAI-compatible API integration |
+
+##### | Job Search | Adzuna API |
+
+##### | Database | SQLAlchemy, PostgreSQL |
+
+##### | Resume Processing | PDF parsing and ReportLab |
+
+##### | Cybersecurity Intelligence | Custom Python intelligence engine |
+
+##### | Version Control | Git, GitHub |
+
+##### 
+
+##### \## Project Structure
+
+##### 
+
+##### ```text
+
+##### CyberPath-AI/
+
+##### ├── backend/
+
+##### │   ├── app/
+
+##### │   │   ├── intelligence/
+
+##### │   │   │   ├── \_\_init\_\_.py
+
+##### │   │   │   ├── adaptive\_engine.py
+
+##### │   │   │   ├── knowledge\_base.py
+
+##### │   │   │   ├── local\_engine.py
+
+##### │   │   │   ├── scoring\_engine.py
+
+##### │   │   │   └── skill\_engine.py
+
+##### │   │   └── main.py
+
+##### │   ├── requirements.txt
+
+##### │   └── Dockerfile
+
+##### ├── frontend/
+
+##### │   ├── src/
+
+##### │   │   └── app/
+
+##### │   │       ├── globals.css
+
+##### │   │       ├── layout.tsx
+
+##### │   │       └── page.tsx
+
+##### │   ├── package.json
+
+##### │   └── Dockerfile
+
+##### ├── README.md
+
+##### ├── DEPLOYMENT.md
+
+##### └── LICENSE
+
+##### ```
+
+##### 
+
+##### \## Getting Started
+
+##### 
+
+##### \### Prerequisites
+
+##### 
+
+##### \- Python 3.12
+
+##### \- Node.js
+
+##### \- PostgreSQL, if using the configured PostgreSQL database
+
+##### \- Required API credentials
+
+##### 
+
+##### \### 1. Clone the Repository
+
+##### 
+
+##### ```bash
+
+##### git clone https://github.com/Y00Nsan/CyberPath-AI.git
+
+##### cd CyberPath-AI
+
+##### ```
+
+##### 
+
+##### \### 2. Backend Setup
+
+##### 
+
+##### On Windows:
+
+##### 
+
+##### ```cmd
+
+##### cd backend
+
+##### py -3.12 -m venv venv312
+
+##### venv312\\Scripts\\activate
+
+##### pip install -r requirements.txt
+
+##### ```
+
+##### 
+
+##### Configure `backend/.env` with the environment variables required by your deployment.
+
+##### 
+
+##### Example:
+
+##### 
+
+##### ```env
+
+##### OPENAI\_API\_KEY=your\_api\_key
+
+##### ADZUNA\_APP\_ID=your\_app\_id
+
+##### ADZUNA\_APP\_KEY=your\_app\_key
+
+##### DATABASE\_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
+
+##### ```
+
+##### 
+
+##### Never commit API credentials or `.env` files.
+
+##### 
+
+##### Start the backend:
+
+##### 
+
+##### ```cmd
+
+##### uvicorn app.main:app --reload
+
+##### ```
+
+##### 
+
+##### Backend API: http://127.0.0.1:8000
+
+##### 
+
+##### \### 3. Frontend Setup
+
+##### 
+
+##### Open a second terminal:
+
+##### 
+
+##### ```cmd
+
+##### cd frontend
+
+##### npm install
+
+##### ```
+
+##### 
+
+##### Create `frontend/.env.local`:
+
+##### 
+
+##### ```env
+
+##### NEXT\_PUBLIC\_API\_URL=http://127.0.0.1:8000
+
+##### ```
+
+##### 
+
+##### Start the frontend:
+
+##### 
+
+##### ```cmd
+
+##### npm run dev
+
+##### ```
+
+##### 
+
+##### Frontend: http://localhost:3000
+
+##### 
+
+##### \## Testing
+
+##### 
+
+##### Frontend production build:
+
+##### 
+
+##### ```cmd
+
+##### cd frontend
+
+##### npm run build
+
+##### ```
+
+##### 
+
+##### Backend syntax check:
+
+##### 
+
+##### ```cmd
+
+##### python -m py\_compile backend/app/main.py
+
+##### ```
+
+##### 
+
+##### These checks do not replace end-to-end testing of live APIs, database connections, and resume-processing workflows.
+
+##### 
+
+##### \## Security \& Privacy
+
+##### 
+
+##### \- API credentials are intended to remain on the backend.
+
+##### \- Environment files and local databases should not be committed.
+
+##### \- Resume data may contain sensitive personal information and should be handled carefully.
+
+##### \- AI-generated resume recommendations should be reviewed before use.
+
+##### \- The intelligence engine is designed to use aggregate skill signals rather than retain raw resume text for adaptive statistics.
+
+##### 
+
+##### \## Deployment
+
+##### 
+
+##### The project is being prepared for public deployment using:
+
+##### 
+
+##### \- \*\*Frontend:\*\* Vercel
+
+##### \- \*\*Backend:\*\* Render
+
+##### \- \*\*Database:\*\* Managed PostgreSQL
+
+##### 
+
+##### A public demo URL will be added after deployment and production verification.
+
+##### 
+
+##### \## Development Status
+
+##### 
+
+##### \*\*Current phase:\*\* GitHub release and deployment preparation.
+
+##### 
+
+##### The frontend has passed a Next.js production build. Public deployment and full production end-to-end verification remain pending.
+
+##### 
+
+##### \## Future Improvements
+
+##### 
+
+##### \- Expand cybersecurity skill and role coverage.
+
+##### \- Improve job-specific resume recommendations.
+
+##### \- Add more robust interview answer evaluation.
+
+##### \- Strengthen production monitoring and automated testing.
+
+##### \- Improve application tracking and career outcome analytics.
+
+##### 
+
+##### \## License
+
+##### 
+
+##### See \[LICENSE](LICENSE) for license details.
+
+##### 
 
