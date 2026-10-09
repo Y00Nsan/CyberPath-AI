@@ -1,171 +1,104 @@
 # CyberPath AI
 
-**AI-Powered Cybersecurity Career Intelligence Platform**
+**An AI-assisted cybersecurity career exploration and job preparation platform.**
 
-CyberPath AI is a full-stack web application designed to help students and early-career professionals discover cybersecurity opportunities, evaluate their qualifications, improve their resumes, and prepare for job interviews.
+[Live Demo](https://cyber-path-ai.vercel.app/) · [API Documentation](https://cyberpath-ai-idlk.onrender.com/docs)
 
-The platform connects resume analysis, cybersecurity job discovery, explainable job matching, application tracking, and AI-assisted interview preparation into one workflow.
+CyberPath AI brings together resume analysis, cybersecurity job discovery, skill-gap assessment, tailored application materials, mock interview practice, and application tracking in a single workflow. It is a portfolio project demonstrating full-stack application development and deployment.
 
-## Key Features
+## Overview
 
-### 1. Resume Analysis
-- Upload a PDF resume.
-- Extract professional experience, education, technical skills, and certifications.
-- Generate a structured candidate profile for career preparation.
+Cybersecurity job seekers often switch between separate tools to evaluate their resumes, find relevant openings, prepare for interviews, and track applications. CyberPath AI explores a more connected workflow:
 
-### 2. Cybersecurity Job Discovery
-- Search cybersecurity-related job opportunities.
-- Filter results by job type and company.
-- Review job descriptions and available application information.
-- Access original job postings.
+**Upload resume → Analyze skills → Discover jobs → Evaluate fit → Prepare applications → Practice interviews → Track progress**
 
-### 3. Job Fit & Cybersecurity Intelligence
-- Compare candidate qualifications with job requirements.
-- Identify strong, partial, and missing skills.
-- Normalize cybersecurity terminology and skill aliases.
-- Generate explainable job-fit and cybersecurity relevance scores.
-- Use cybersecurity-specific skill knowledge and NICE-aligned category labels.
+## Features
 
-### 4. AI Resume Tailoring
-- Select a job to prepare for.
-- Generate a job-focused version of the candidate's resume.
-- Review a PDF with highlighted changes and explanatory comments.
-- Preserve existing experience rather than inventing qualifications.
+| Feature | Description |
+| --- | --- |
+| Resume analysis | Upload a PDF resume and analyze cybersecurity-related experience and skills. |
+| Job discovery | Search for relevant openings through the Adzuna job API. |
+| Job-fit and skill-gap analysis | Compare candidate skills with role requirements and surface areas for development. |
+| Career planning | Generate role-oriented learning recommendations, roadmaps, and preparation plans. |
+| Resume tailoring | Prepare role-specific resume content and generate PDF output. |
+| Mock interviews | Practice role- and resume-informed questions with evaluation and feedback. |
+| Application Tracker | Save job opportunities, update application statuses, and manage notes and deadlines. |
+| Application analytics | View application progress and related career insights. |
 
-### 5. AI Mock Interviews
-- Practice 10 questions for a selected job:
-  - 5 job-specific questions.
-  - 5 resume-specific questions.
-- Submit answers and receive evaluation feedback.
-- Review suggested answer improvements.
-- Navigate between interview questions.
-
-### 6. Application Tracking
-- Save job opportunities.
-- Organize applications.
-- Return to original job postings.
-- Connect job discovery with application preparation.
-
-## Cybersecurity Intelligence Engine
-
-CyberPath AI includes a deterministic cybersecurity intelligence layer implemented in Python.
-
-Its capabilities include:
-
-- Cybersecurity skill extraction.
-- Terminology and alias normalization.
-- Candidate-to-job skill comparison.
-- Strong, partial, and missing skill classification.
-- Explainable job-fit scoring.
-- Cybersecurity relevance scoring.
-- NICE-aligned category labels.
-- Bounded aggregate learning signals.
-
-The intelligence engine uses domain-specific rules and structured knowledge. It is not presented as a replacement for a general-purpose large language model.
-
-### Intelligence API Endpoints
-
-```http
-POST /intelligence/test
-POST /intelligence/feedback
-GET /intelligence/insights
-```
+Some features rely on the project's local, rule-based/domain-specific intelligence components rather than a hosted large language model. Results should be treated as career-planning assistance, not definitive hiring assessments.
 
 ## Technology Stack
 
-| Layer | Technologies |
-|---|---|
-| Frontend | Next.js, React, TypeScript, CSS |
-| Backend | FastAPI, Python |
-| AI Integration | OpenAI-compatible API integration |
-| Job Search | Adzuna API |
-| Database | SQLAlchemy, PostgreSQL |
-| Resume Processing | PDF parsing and ReportLab |
-| Cybersecurity Intelligence | Custom Python intelligence engine |
-| Version Control | Git, GitHub |
+| Layer | Technology |
+| --- | --- |
+| Frontend | Next.js, React, TypeScript |
+| Backend | Python, FastAPI |
+| Data access | SQLAlchemy |
+| Default database | SQLite |
+| External jobs data | Adzuna API |
+| Deployment | Vercel (frontend), Render (backend) |
 
-## Project Structure
+## Architecture
 
 ```text
-CyberPath-AI/
-├── backend/
-│   ├── app/
-│   │   ├── intelligence/
-│   │   │   ├── __init__.py
-│   │   │   ├── adaptive_engine.py
-│   │   │   ├── knowledge_base.py
-│   │   │   ├── local_engine.py
-│   │   │   ├── scoring_engine.py
-│   │   │   └── skill_engine.py
-│   │   └── main.py
-│   ├── requirements.txt
-│   └── Dockerfile
-├── frontend/
-│   ├── src/
-│   │   └── app/
-│   │       ├── globals.css
-│   │       ├── layout.tsx
-│   │       └── page.tsx
-│   ├── package.json
-│   └── Dockerfile
-├── README.md
-├── DEPLOYMENT.md
-└── LICENSE
+Browser
+   |
+   v
+Next.js frontend (Vercel)
+   |
+   | HTTPS API requests
+   v
+FastAPI backend (Render)
+   |-- Resume and career analysis
+   |-- Job discovery --------> Adzuna API
+   |-- Interview and preparation workflows
+   |-- Application tracking
+   |-- SQLAlchemy -----------> SQLite (default)
 ```
 
-## Getting Started
+## Running Locally
 
 ### Prerequisites
 
-- Python 3.12
-- Node.js
-- PostgreSQL, if using the configured PostgreSQL database
-- Required API credentials
+- Python 3.11+ (use a version compatible with the backend dependencies)
+- Node.js and npm (use a version supported by the project's Next.js release)
+- Adzuna developer credentials for live job searches
 
-### 1. Clone the Repository
+### Backend
+
+From the repository root:
 
 ```bash
-git clone https://github.com/Y00Nsan/CyberPath-AI.git
-cd CyberPath-AI
-```
-
-### 2. Backend Setup
-
-On Windows:
-
-```cmd
 cd backend
-py -3.12 -m venv venv312
-venv312\Scripts\activate
+python -m venv .venv
+```
+
+Activate the virtual environment:
+
+```powershell
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+```
+
+```bash
+# macOS / Linux
+source .venv/bin/activate
+```
+
+Install dependencies and start the API:
+
+```bash
 pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
 ```
 
-Configure `backend/.env` with the environment variables required by your deployment.
+The API documentation is available at `http://localhost:8000/docs`.
 
-Example:
+### Frontend
 
-```env
-OPENAI_API_KEY=your_api_key
-ADZUNA_APP_ID=your_app_id
-ADZUNA_APP_KEY=your_app_key
-DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
-```
+Open another terminal from the repository root:
 
-Never commit API credentials or `.env` files.
-
-Start the backend:
-
-```cmd
-uvicorn app.main:app --reload
-```
-
-Backend API: http://127.0.0.1:8000
-
-### 3. Frontend Setup
-
-Open a second terminal:
-
-```cmd
+```bash
 cd frontend
 npm install
 ```
@@ -173,66 +106,63 @@ npm install
 Create `frontend/.env.local`:
 
 ```env
-NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
+NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
 Start the frontend:
 
-```cmd
+```bash
 npm run dev
 ```
 
-Frontend: http://localhost:3000
+Open `http://localhost:3000`.
 
-## Testing
+## Configuration
 
-Frontend production build:
+The backend reads environment variables, including from `backend/.env` during local development.
 
-```cmd
-cd frontend
-npm run build
+```env
+# backend/.env — examples only; replace with your own values
+ADZUNA_APP_ID=your_adzuna_app_id
+ADZUNA_APP_KEY=your_adzuna_app_key
+DATABASE_URL=sqlite:///./cyberpath.db
+CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 ```
 
-Backend syntax check:
+For the deployed frontend, add `https://cyber-path-ai.vercel.app` to the backend's `CORS_ORIGINS` setting. Configure secrets through Render environment variables, not in source control.
 
-```cmd
-python -m py_compile backend/app/main.py
-```
-
-These checks do not replace end-to-end testing of live APIs, database connections, and resume-processing workflows.
-
-## Security & Privacy
-
-- API credentials are intended to remain on the backend.
-- Environment files and local databases should not be committed.
-- Resume data may contain sensitive personal information and should be handled carefully.
-- AI-generated resume recommendations should be reviewed before use.
-- The intelligence engine is designed to use aggregate skill signals rather than retain raw resume text for adaptive statistics.
+**Never commit real API keys, `.env` files, uploaded resumes, or personal application records.**
 
 ## Deployment
 
-The project is being prepared for public deployment using:
+- **Frontend:** [cyber-path-ai.vercel.app](https://cyber-path-ai.vercel.app/)
+- **Backend API:** [cyberpath-ai-idlk.onrender.com](https://cyberpath-ai-idlk.onrender.com/)
+- **Interactive API docs:** [FastAPI Swagger UI](https://cyberpath-ai-idlk.onrender.com/docs)
 
-- **Frontend:** Vercel
-- **Backend:** Render
-- **Database:** Managed PostgreSQL
+The frontend uses `NEXT_PUBLIC_API_URL` to point to the deployed FastAPI service. The backend requires Adzuna credentials for live job search.
 
-A public demo URL will be added after deployment and production verification.
+## Demo and Data Limitations
 
-## Development Status
+This repository is intended primarily as a **portfolio demonstration**, not a production-ready multi-user service.
 
-**Current phase:** GitHub release and deployment preparation.
-
-The frontend has passed a Next.js production build. Public deployment and full production end-to-end verification remain pending.
+- SQLite is the default storage option. On hosting platforms with ephemeral filesystems, application records may be lost after redeployment or instance replacement.
+- User-specific authentication and access controls should be implemented and tested before storing real applicants' private information in a public multi-user deployment.
+- Do not upload sensitive resumes or use real personal application records for public demonstrations until privacy controls have been verified.
+- External job results depend on Adzuna API availability and credentials.
+- Resume scoring and interview feedback are assistive outputs, not guarantees of hiring outcomes.
 
 ## Future Improvements
 
-- Expand cybersecurity skill and role coverage.
-- Improve job-specific resume recommendations.
-- Add more robust interview answer evaluation.
-- Strengthen production monitoring and automated testing.
-- Improve application tracking and career outcome analytics.
+- User authentication and per-user data isolation
+- Durable managed database and migration workflow
+- File upload validation, retention policies, and privacy safeguards
+- Automated backend and frontend tests
+- Monitoring, error reporting, and API rate limiting
 
-## License
+## Project Purpose
 
-See [LICENSE](LICENSE) for license details.
+CyberPath AI was developed to demonstrate end-to-end product engineering: integrating a modern web frontend, a Python API, career-analysis logic, external job data, persistence, and cloud deployment into one cohesive cybersecurity-focused application.
+
+---
+
+**Built as a cybersecurity software engineering portfolio project.**
